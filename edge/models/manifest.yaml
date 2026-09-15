@@ -1,0 +1,39 @@
+schema_version: 1
+generated_at: 2026-09-15
+
+artifacts:
+  - path: insightface/buffalo_l/det_10g.onnx
+    role: alternate-scrfd-face-detector
+    upstream: InsightFace buffalo_l
+    upstream_url: https://github.com/deepinsight/insightface
+    license: non-commercial-research-only
+    license_note: InsightFace code is MIT, but pretrained model weights are restricted to non-commercial research. Commercial use requires a separate license from insightface.ai.
+    size_bytes: 16923827
+    sha256: 5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91
+
+  - path: insightface/buffalo_l/w600k_r50.onnx
+    role: arcface-recognition
+    upstream: InsightFace buffalo_l
+    upstream_url: https://github.com/deepinsight/insightface
+    license: non-commercial-research-only
+    license_note: InsightFace code is MIT, but pretrained model weights are restricted to non-commercial research. Commercial use requires a separate license from insightface.ai.
+    size_bytes: 174383860
+    sha256: 4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43
+
+  - path: insightface/buffalo_sc/det_500m.onnx
+    role: scrfd-face-detector
+    upstream: InsightFace buffalo_sc
+    upstream_url: https://github.com/deepinsight/insightface
+    license: non-commercial-research-only
+    license_note: InsightFace code is MIT, but pretrained model weights are restricted to non-commercial research. Commercial use requires a separate license from insightface.ai.
+    size_bytes: 2524817
+    sha256: 5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a
+
+  - path: insightface/addons/liveness.onnx
+    role: pad-liveness
+    upstream: InsightFace Model Addons
+    upstream_url: https://github.com/deepinsight/insightface
+    license: non-commercial-research-only
+    license_note: InsightFace code is MIT, but pretrained model weights are restricted to non-commercial research. Commercial use requires a separate license from insightface.ai.
+    size_bytes: 1484006
+    sha256: 87a9ac1dbb16a61eec212957e5095e62a8769c1e188af9b0198f253302c4afdb

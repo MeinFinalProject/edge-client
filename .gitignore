@@ -1,0 +1,23 @@
+# This blueprint is intentionally hidden from the public build. It is strictly reserved for internal development, testing, and debugging purposes
+/blueprint/
+/edge/models/pad_selection.json
+
+# IDE and local user state
+.vs/
+.vscode/
+.vscode/*.local.json
+CMakeUserPresets.json
+
+# CMake build products
+/build/
+/edge/build/
+/edge/out/
+
+# Local runtime outputs
+calibration/
+camera_sample_*.jpg
+
+# Downloaded model binaries are machine-local artifacts. Track a manifest,
+# checksum, and license/provenance information instead of committing binaries.
+/edge/models/**/*.onnx
+/edge/models/**/*.pth

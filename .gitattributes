@@ -1,0 +1,13 @@
+* text=auto
+
+*.bat text eol=crlf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.hlsl text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+
+*.onnx binary
+*.pth binary
+*.png binary
+*.jpg binary

@@ -30,10 +30,8 @@ std::string utc_stamp() {
 
 fs::path find_model(fs::path root, fs::path const& relative) {
     while (!root.empty()) {
-        for (auto const& prefix : {fs::path{}, fs::path{"edge"}}) {
-            auto candidate = root / prefix / "models" / relative;
-            if (fs::is_regular_file(candidate)) return fs::absolute(candidate);
-        }
+        auto candidate = root / "models" / relative;
+        if (fs::is_regular_file(candidate)) return fs::absolute(candidate);
         auto parent = root.parent_path();
         if (parent == root) break;
         root = parent;

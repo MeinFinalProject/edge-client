@@ -607,7 +607,7 @@ void Camera::Impl::initialize_capture() {
     std::optional<Candidate> best;
 
     // Production searches only for the requested mode. Full capability
-    // enumeration belongs to edge/tools/camera_probe.cpp.
+    // enumeration belongs to tools/camera_probe.cpp.
     for (auto const& info : selected_group.SourceInfos()) {
         auto stream_type = info.MediaStreamType();
         auto stream_preference = to_stream_preference(stream_type);

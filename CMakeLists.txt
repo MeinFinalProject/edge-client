@@ -7,6 +7,7 @@ include(CTest)
 option(VISION_RUNTIME_BUILD_TOOLS "Build native research/diagnostic tools" ON)
 
 add_subdirectory(vision_runtime)
+add_subdirectory(edge_app)
 
 if(VISION_RUNTIME_BUILD_TOOLS)
     add_subdirectory(tools)

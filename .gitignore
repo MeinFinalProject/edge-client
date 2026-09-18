@@ -15,6 +15,14 @@ CMakeUserPresets.json
 # Local runtime outputs
 calibration/
 camera_sample_*.jpg
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.dpapi
+*.dpapi.new
+edge-config.local.json
 
 # Downloaded model binaries are machine-local artifacts. Track a manifest,
 # checksum, and license/provenance information instead of committing binaries.

@@ -20,6 +20,8 @@ add_library(vision_runtime STATIC
 
     pipeline/face_tracking_runtime.cpp
     pipeline/biometric_attendance_runtime.cpp
+    pipeline/attendance_processor.cpp
+    pipeline/gallery_matcher.cpp
 )
 
 

@@ -42,3 +42,8 @@ target_link_libraries(env_probe
 )
 
 add_vision_tool(model_inspect model_inspect.cpp)
+
+add_vision_tool(edge_client edge_client.cpp)
+target_link_libraries(edge_client PRIVATE edge_app_core)
+
+add_vision_tool(biometric_benchmark biometric_benchmark.cpp)

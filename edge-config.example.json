@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "device_id": "edge-development-01",
+  "base_url": "",
+  "database": "data/edge.db",
+  "credential_file": "data/device.dpapi",
+  "scrfd_model": "models/insightface/buffalo_sc/det_500m.onnx",
+  "arcface_model": "models/insightface/buffalo_l/w600k_r50.onnx",
+  "pad_model": "models/insightface/addons/liveness.onnx",
+  "recognition_threshold": 0.75,
+  "recognition_min_margin": 0.0,
+  "calibration_id": "",
+  "allow_uncalibrated_thresholds": true,
+  "allow_loopback_http": false
+}

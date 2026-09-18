@@ -1,6 +1,7 @@
 #include "arcface/arcface.hpp"
 #include "liveness/liveness.hpp"
 #include "pipeline/face_tracking_runtime.hpp"
+#include "pipeline/attendance_processor.hpp"
 
 #include <Windows.h>
 #include <d3d11.h>
@@ -86,7 +87,7 @@ struct Args {
     int enroll_samples = 12;
     int arcface_every = 5;
     int pad_every = 10;
-    bool pad_monitor = true; // monitor only; attendance gate lives in the runtime
+    bool pad_monitor = true; // display toggle; recognition always requires PAD
     bool pad_disabled = false;
 };
 
@@ -460,7 +461,7 @@ private:
         text(dc, 18, 9, line1.str(), RGB(110, 235, 255), font_);
 
         std::wstring line2 = L"GPU image path: NV12 -> SCRFD / PAD / ArcFace   |   CPU: ByteTrack + decisions + overlay";
-        if (hud.pad_monitor) line2 += L"   |   PAD ADDON: SCORE MONITOR, NOT ATTENDANCE GATE";
+        if (hud.pad_monitor) line2 += L"   |   PAD ADDON: VOTE MEDIAN (AFTER ENROLLMENT)";
         text(dc, 18, 41, line2, RGB(235, 235, 235), font_small_);
 
         if (!hud.message.empty()) {
@@ -501,7 +502,7 @@ private:
             }
             text(dc, x1 + 4, std::max(104, y1 - 22), row2.str(), color, font_small_);
 
-            if (t.pad_p_real) {
+            if (hud.pad_monitor && t.pad_p_real) {
                 std::wostringstream row3;
                 row3 << L"PAD real " << std::fixed << std::setprecision(3) << *t.pad_p_real
                      << (*t.pad_p_real >= vision_runtime::liveness::kTaLiveThreshold ? L" LIVE" : L" SPOOF");
@@ -540,8 +541,6 @@ struct TrackState {
     std::optional<float> pad_p_real;
     std::optional<float> cosine;
     bool identity_matched = false;
-    bool attendance_emitted = false;
-    int consecutive_matches = 0;
 };
 
 std::array<float, kEmbeddingSize> finalize_reference(
@@ -571,8 +570,7 @@ void clear_identity_state(
         (void)id;
         state.cosine.reset();
         state.identity_matched = false;
-        state.attendance_emitted = false;
-        state.consecutive_matches = 0;
+        state.pad_p_real.reset();
     }
 }
 
@@ -621,12 +619,12 @@ int main(int argc, char** argv) {
 
         std::cout
             << "================================================================================\n"
-            << "TA WALK-THROUGH PROTOTYPE DEMO v4.8\n"
+            << "TA WALK-THROUGH PROTOTYPE DEMO\n"
             << "================================================================================\n"
-            << "Camera              : Media Foundation 1280x720@30 NV12 GPU-backed\n"
+            << "Camera              : MediaCapture/MediaFrameReader 1280x720@30 NV12 GPU-backed\n"
             << "SCRFD               : GPU preprocessing + WinML/DirectML\n"
             << "ByteTrack           : native CPU (intentional winner)\n"
-            << "PAD                 : InsightFace addon GPU; TA threshold 0.95; monitor only\n"
+            << "PAD                 : InsightFace addon GPU; TA threshold 0.95; shared attendance gate\n"
             << "ArcFace             : GPU alignment/preprocessing + WinML/DirectML\n"
             << "Preview             : D3D11 video processor -> swapchain; no CPU image array\n"
             << "Overlay/control     : CPU/GDI + small model outputs\n"
@@ -637,6 +635,21 @@ int main(int argc, char** argv) {
         ArcFaceRecognizer recognizer{arc_cfg};
         std::unique_ptr<LivenessDetector> pad;
         if (pad_cfg) pad = std::make_unique<LivenessDetector>(*pad_cfg);
+        std::unique_ptr<vision_runtime::pipeline::AttendanceProcessor> decisions;
+        if (pad) {
+            vision_runtime::pipeline::BiometricAttendanceConfig config;
+            config.recognition_similarity_threshold = args.identity_threshold;
+            config.allow_uncalibrated_thresholds = true;
+            config.min_detection_score = args.min_detection_score;
+            config.pad_every_frames = static_cast<std::size_t>(args.pad_every);
+            config.recognition_every_frames = static_cast<std::size_t>(args.arcface_every);
+            decisions = std::make_unique<vision_runtime::pipeline::AttendanceProcessor>(config,
+                vision_runtime::pipeline::BiometricEvaluators{
+                    [&](auto const& frame, auto const& faces) { return pad->evaluate_many(frame, faces); },
+                    [&](auto const& frame, auto const& faces) { return recognizer.evaluate_many(frame, faces); }
+                });
+        }
+
 
         PreviewWindow preview{1280, 720};
         runtime.start();
@@ -666,6 +679,7 @@ int main(int argc, char** argv) {
             if (preview.consume_key(VK_ESCAPE)) break;
             if (preview.consume_key('E')) {
                 clear_identity_state(states, enroll_sum, enrolled, reference_ready, reference);
+                if (decisions) decisions->set_gallery({});
                 std::cout << "[DEMO] Re-enrollment requested.\n";
             }
             if (preview.consume_key('P')) {
@@ -680,6 +694,7 @@ int main(int argc, char** argv) {
                 runtime.reset_tracker();
                 states.clear();
                 clear_identity_state(states, enroll_sum, enrolled, reference_ready, reference);
+                if (decisions) decisions->set_gallery({});
                 std::cout << "[DEMO] Tracker + identity state reset.\n";
             }
 
@@ -708,8 +723,9 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // This UI is a score monitor; BiometricAttendanceRuntime enforces the vote gate.
-            if (pad && pad_monitor_enabled && (tracking_frame_index % static_cast<std::uint64_t>(args.pad_every) == 0)) {
+            // During manual enrollment, show scores only. Once enrolled, the shared
+            // processor supplies PAD results without a second inference pass.
+            if (!reference_ready && pad && pad_monitor_enabled && (tracking_frame_index % static_cast<std::uint64_t>(args.pad_every) == 0)) {
                 std::vector<vision_runtime::FaceDetection> observations;
                 std::vector<std::uint64_t> ids;
                 for (auto const& track : frame->tracks) {
@@ -740,51 +756,36 @@ int main(int argc, char** argv) {
                     if (enrolled >= args.enroll_samples) {
                         reference = finalize_reference(enroll_sum, enrolled);
                         reference_ready = true;
+                        if (decisions) decisions->set_gallery({{args.identity_name, reference}});
                         for (auto& [id, state] : states) {
                             (void)id;
                             state.cosine.reset();
-                            state.consecutive_matches = 0;
                             state.identity_matched = false;
-                            state.attendance_emitted = false;
                         }
                         std::cout << "[DEMO] ArcFace reference locked from " << enrolled << " samples.\n";
                     }
                 }
             }
 
-            // Verification: evaluate all due, unmatched tracks from the same GPU frame in one batch-like call.
-            if (reference_ready && (tracking_frame_index % static_cast<std::uint64_t>(args.arcface_every) == 2 % args.arcface_every)) {
-                std::vector<FaceDetection> observations;
-                std::vector<std::uint64_t> ids;
-                for (auto const& track : frame->tracks) {
-                    if (!track.has_observation || track.observation.score < args.min_detection_score) continue;
-                    auto& state = states[track.track_id];
-                    if (state.identity_matched) continue; // conditional inference cache
-                    observations.push_back(track.observation);
-                    ids.push_back(track.track_id);
+            // Runtime and demo use the same PAD/quality/retry/cooldown rules.
+            // Enrollment remains a supervised demo operation, not remote enrollment.
+            if (reference_ready && decisions) {
+                auto result = decisions->process(*frame);
+                using Phase = vision_runtime::pipeline::BiometricTrackPhase;
+                for (auto const& snapshot : result.tracks) {
+                    auto& state = states[snapshot.track_id];
+                    state.identity_matched = snapshot.phase == Phase::Recognized ||
+                                             snapshot.phase == Phase::DuplicateIdentity;
+                    state.cosine = snapshot.recognition_attempts
+                        ? std::optional<float>{snapshot.identity_similarity} : std::nullopt;
+                    state.pad_p_real = snapshot.pad_attempts
+                        ? std::optional<float>{snapshot.pad_median_p_real} : std::nullopt;
                 }
-                if (!observations.empty()) {
-                    auto results = recognizer.evaluate_many(frame->gpu_frame, observations);
-                    for (std::size_t i = 0; i < results.size() && i < ids.size(); ++i) {
-                        auto& state = states[ids[i]];
-                        const float sim = vision_runtime::arcface::cosine_similarity(reference, results[i].embedding);
-                        state.cosine = sim;
-                        if (sim >= args.identity_threshold) {
-                            ++state.consecutive_matches;
-                        } else {
-                            state.consecutive_matches = 0;
-                        }
-                        if (state.consecutive_matches >= 2) {
-                            state.identity_matched = true;
-                            if (!state.attendance_emitted) {
-                                state.attendance_emitted = true;
-                                std::cout << "[ATTENDANCE-DEMO] identity=" << args.identity_name
-                                          << " track=ID" << ids[i]
-                                          << " cosine=" << std::fixed << std::setprecision(4) << sim
-                                          << " (demo threshold, backend not connected)\n";
-                            }
-                        }
-                    }
+                for (auto const& event : result.attendance_events) {
+                    std::cout << "[ATTENDANCE-DEMO] identity=" << event.identity_id
+                              << " track=ID" << event.track_id
+                              << " cosine=" << event.similarity
+                              << " (shared decision engine; demo enrollment, not persisted)\n";
                 }
             }
 
@@ -824,7 +825,8 @@ int main(int argc, char** argv) {
                     << L" - keep exactly one face visible";
                 hud.message = msg.str();
             } else {
-                hud.message = L"REFERENCE READY - identity match uses DEMO threshold only; PAD score is monitor-only";
+                hud.message = decisions ? L"REFERENCE READY - shared PAD gate + recognition; DEMO threshold, no persistence"
+                                        : L"PAD DISABLED - enrollment/preview only; attendance disabled";
             }
 
             preview.render(frame->gpu_frame, overlay_tracks, hud);

@@ -11,19 +11,23 @@ frontend and backend are maintained in separate repositories.
 ## Project status
 
 The project is an active research prototype. Individual vision components and
-attendance orchestration are implemented; application integration and broader
-evaluation remain in progress.
+attendance orchestration now share a decision engine with the interactive demo.
+A native application adds local event durability, gallery persistence, and
+background synchronization. The backend API remains a proposal verified with
+local mocks; broader biometric evaluation remains in progress.
 
 | Component | Current implementation |
 |---|---|
 | Tracking runtime | Camera capture, SCRFD detection, and ByteTrack tracking |
-| Attendance runtime | Observation quality checks, PAD voting, ArcFace gallery matching, and event deduplication per session |
-| Interactive demo | Preview, enrollment, identity matching, and PAD score monitoring |
+| Attendance runtime | Landmark/quality checks, PAD voting, bounded recognition retry, gallery matching, and identity cooldown |
+| Interactive demo | Supervised enrollment and preview using the shared PAD/recognition decision engine |
+| Edge application | SQLite outbox/gallery, UUIDv7 events, DPAPI credentials, and background HTTP synchronization |
 | Evaluation tools | Component diagnostics, model inspection, and labeled liveness capture to CSV |
 
-The interactive demo uses its own identity decision flow. Its PAD display is a
-monitor, not an attendance gate. The separate attendance runtime implements PAD
-gating but is not yet connected to the demo or backend storage.
+`ta_demo` keeps its enrollment and console events in memory. `edge_client` stores
+accepted events locally before upload and applies versioned galleries between
+frames. Both use `AttendanceProcessor` for biometric decisions. The API and
+offline setup are documented in [the edge v1 contract](contracts/edge-v1.md).
 
 ## Architecture
 
@@ -46,7 +50,7 @@ InsightFace Liveness Add-on — PAD score and per-track voting
 ArcFace — embedding and gallery matching
     │ matched
     ▼
-Attendance event — application integration boundary
+Attendance event → SQLite outbox → HTTP worker → per-event receipt
 ```
 
 [`FaceTrackingRuntime`](vision_runtime/pipeline/face_tracking_runtime.hpp)
@@ -54,12 +58,33 @@ returns the frame, detections, and tracks together, keeping image data and face
 observations from the same capture.
 [`BiometricAttendanceRuntime`](vision_runtime/pipeline/biometric_attendance_runtime.hpp)
 composes the subsequent PAD and recognition stages. The application supplies
-model paths, an identity gallery, and recognition thresholds.
+model paths, an identity gallery, and explicit recognition thresholds. Empty
+galleries are allowed at startup but cannot produce attendance events. A
+calibration ID or explicit development opt-in is required; there is no default
+production recognition threshold.
 
 Image preprocessing and model inference use the GPU path. Detection decoding,
 tracking, landmark transform fitting, similarity calculations, and application
 decisions use the CPU. GPU resource sharing avoids full-image CPU round trips
 in the runtime image path; synchronization and model-output readback still occur.
+
+The application code is organized by responsibility:
+
+```text
+edge_app/
+  domain/    Attendance records, gallery snapshots, UUID generation
+  storage/   Shared Database, schema, outbox and gallery repositories
+  sync/      HTTP/wire format, upload, gallery sync, retry, worker and network hints
+  security/  Device credentials and model checksums
+  app/       Configuration, attendance coordinator and application lifecycle
+```
+
+`tools/edge_client.cpp` handles CLI and console controls. `EdgeApplication`
+owns the database and repositories and manages capture/synchronization lifetime.
+`AttendanceCoordinator` commits accepted events and installs gallery snapshots
+on the vision owner thread. Repositories share one database connection; both
+sync tasks share one HTTP client and one worker. Domain headers contain only
+standard C++ data types. These folders still build into one `edge_app_core` library.
 
 ## Requirements
 
@@ -154,9 +179,29 @@ Inspect the available hardware and launch the interactive demo:
 ```
 
 The demo discovers model files under `models/`. Press **E** to repeat enrollment,
-**P** to toggle PAD monitoring, **R** to reset tracking and identity state, and
+**P** to toggle the PAD display, **R** to reset tracking and identity state, and
 **Esc** to exit. Enrollment is held in memory; console attendance messages are
-demonstration events rather than persisted records.
+demonstration events rather than persisted records. PAD remains mandatory for
+demo recognition; `--no-pad` is an enrollment/preview diagnostic mode only.
+
+### Offline-first application
+
+```powershell
+Copy-Item edge-config.example.json edge-config.local.json
+.\out\build\windows-x64\tools\Release\edge_client.exe --config edge-config.local.json --validate-only
+.\out\build\windows-x64\tools\Release\edge_client.exe --config edge-config.local.json
+```
+
+The example disables networking and explicitly uses a development threshold.
+An empty gallery produces no events. Import a compatible snapshot or configure
+the future server endpoint as described in the [API contract](contracts/edge-v1.md).
+`--validate-only` checks configuration, model files/hash (including the selected PAD checksum), and stored gallery
+metadata without starting camera/inference. Use Ctrl+C to stop capture.
+
+Event UUIDs and occurrence times survive retries. Partial/missing receipts keep
+unacknowledged rows pending; 401/403 pauses requests until credentials change.
+The worker never accesses the vision runtime. Local COMMIT is required before
+reporting an event as persisted.
 
 ### Capture labeled liveness observations
 
@@ -195,14 +240,22 @@ rejected inputs. Use `--help` for the complete option list.
 | `liveness_probe` | Observe PAD scores, rejected inputs, and timing |
 | `liveness_capture` | Collect labeled PAD observations to CSV |
 | `arcface_probe` | Examine enrollment and embedding stability |
-| `ta_demo` | Preview tracking, enrollment, identity matching, and PAD scores |
+| `ta_demo` | Preview/enrollment with shared PAD and recognition decisions |
+| `edge_client` | Offline-first capture, durable outbox/gallery, credential provisioning, and background sync |
+| `biometric_benchmark` | Synthetic GPU 1/2/3-crop service times and CPU gallery benchmark to CSV |
 
 ## Validation
 
-The default CTest suite contains three tests: `camera.format_selector`,
-`camera.contract`, and `liveness.contract`. They cover camera configuration
-policies, lifecycle contracts without capture, and PAD decision/voting and
-capture metadata rules.
+The default CTest suite contains eleven tests: camera configuration/lifecycle, PAD
+contracts, shared attendance decisions, durable storage/synchronization, and
+native HTTP against a loopback mock, wire format, credentials, and coordinator
+gallery/commit boundaries. Tests cover 100 offline events, forced
+process termination around commits, gallery rollback, lost/partial/invalid ACKs,
+authentication blocking, retry delays, DPAPI, redirects, timeouts, and response
+size limits. Additional regressions cover database v1-to-v2 migration, endpoint
+backoff across new events/restarts, 10,000-template replacement/rollback, HTTP
+error bodies, and inconclusive zero embedding aggregates. No production backend,
+webcam, or weights are required for these tests.
 
 A separate hardware test checks GPU preprocessing on synthetic NV12 frames.
 Passing a model path additionally exercises actual GPU inference and transitions
@@ -212,13 +265,22 @@ between rejected and accepted inputs:
 .\out\build\windows-x64\tests\Release\liveness_gpu_preprocess_test.exe models/insightface/addons/liveness.onnx
 ```
 
-The current development-machine validation passed the Release build, all three
-unit tests, and 13 synthetic GPU preprocessing cases, including actual model
+The current development-machine validation passed the Release build, all eleven
+CTest cases, and 13 synthetic GPU preprocessing cases, including actual model
 inference. These checks establish implementation behavior on that machine;
 they do not establish PAD accuracy or complete attendance-system correctness.
 
-Broader subject and attack evaluation, attendance-state integration tests,
-persistent gallery storage, and backend transport remain outstanding.
+Broader subject/attack evaluation, calibrated recognition thresholds, real
+walk-through time-to-verified measurements, and production backend integration
+remain outstanding. Synthetic benchmarks measure service time, not biometric
+accuracy. `evaluate_many` still evaluates faces serially; true batching and GPU
+gallery matching remain measurement-driven optimizations.
+
+```powershell
+.\out\build\windows-x64\tools\Release\biometric_benchmark.exe out/benchmarks/session-01.csv models
+```
+
+Use a new output filename for each run. The tool does not open a camera.
 
 ## Repository layout
 
@@ -227,7 +289,10 @@ persistent gallery storage, and backend transport remain outstanding.
 ├── CMakeLists.txt           # Build entry point
 ├── CMakePresets.json        # Windows x64 configure, build, and test presets
 ├── vision_runtime/         # Camera, detection, tracking, PAD, recognition, orchestration
-├── tools/                  # Diagnostic and interactive executables
+├── edge_app/               # Local storage, credentials, event contract, HTTP and worker
+├── contracts/              # Proposed API contract for the future backend
+├── edge-config.example.json # Offline development configuration
+├── tools/                  # Application, diagnostic and interactive executables
 ├── tests/                  # Unit and hardware-dependent tests
 ├── models/                 # Artifact manifest and locally supplied weights
 └── out/                    # Generated build output; excluded from Git

@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -22,6 +23,7 @@ enum class BiometricTrackPhase {
     Recognizing,
     Recognized,
     UnknownIdentity,
+    RecognitionDeferred,
     DuplicateIdentity,
 };
 
@@ -59,7 +61,16 @@ struct BiometricAttendanceConfig {
 
     // MUST be calibrated for the deployed gallery. No universal ArcFace cosine
     // threshold is assumed by this runtime.
-    float recognition_similarity_threshold = 0.0F;
+    float recognition_similarity_threshold = std::numeric_limits<float>::quiet_NaN();
+    std::string calibration_id;
+    bool allow_uncalibrated_thresholds = false;
+
+    // Development quality/retry policy; validate on target walk-through data.
+    float max_alignment_rmse = 8.0F; // ArcFace output pixels, not source pixels
+    float retry_quality_gain = 1.25F;
+    std::size_t recognition_extra_attempts = 1;
+    std::chrono::milliseconds event_cooldown{30000};
+    std::chrono::milliseconds evidence_ttl{3000};
 
     // Optional ambiguity guard between the best and second-best DIFFERENT
     // identities in the gallery. Set 0 to disable.
@@ -90,6 +101,7 @@ struct BiometricTrackSnapshot {
 };
 
 struct AttendanceEvent {
+    std::int64_t occurred_at_utc_ms = 0;
     std::uint64_t camera_frame_id = 0;
     std::uint64_t track_id = 0;
 
@@ -118,10 +130,10 @@ struct BiometricAttendanceFrame {
 //   -> quality gate
 //   -> PAD temporal vote
 //   -> ArcFace temporal embedding + gallery match
-//   -> one attendance event per identity per runtime session.
+//   -> biometric events with a short monotonic identity cooldown.
 //
 // The class intentionally does not write HTTP/SQLite itself. AttendanceEvent is
-// the boundary for a future attendance transport/storage adapter.
+// the boundary consumed by edge_app for local persistence and synchronization.
 class BiometricAttendanceRuntime {
 public:
     explicit BiometricAttendanceRuntime(BiometricAttendanceConfig config);
@@ -134,6 +146,7 @@ public:
 
     // Replace the in-memory recognition gallery. Multiple templates may use the
     // same identity_id; the matcher keeps the best score per identity.
+    // Owner-thread only, between frames. Clears evidence, retains cooldowns.
     void set_gallery(std::vector<GalleryTemplate> gallery);
     [[nodiscard]] std::size_t gallery_size() const noexcept;
 
@@ -144,7 +157,7 @@ public:
         std::chrono::milliseconds timeout = std::chrono::milliseconds{1000}
     );
 
-    // Clears Track state and attendance de-duplication while keeping the gallery.
+    // Clears Track evidence; keeps the gallery and unexpired identity cooldowns.
     void reset_session();
 
     [[nodiscard]] bool running() const noexcept;

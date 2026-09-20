@@ -58,6 +58,9 @@ add_edge_test(attendance_coordinator_test attendance/attendance_coordinator_test
 add_edge_test(edge_sync_service_test sync/sync_service_test.cpp edge.sync)
 add_edge_test(edge_offline_recovery_test failure/offline_recovery_test.cpp edge.failure)
 add_edge_test(edge_http_test sync/http_client_test.cpp edge.http_loopback)
+add_edge_test(edge_persistence_recovery_test failure/persistence_recovery_test.cpp edge.persistence_recovery)
+add_edge_test(edge_local_data_test security/local_data_test.cpp edge.local_data)
+add_edge_test(edge_deployment_config_test security/deployment_config_test.cpp edge.deployment_config)
 target_link_libraries(edge_http_test PRIVATE ws2_32)
 
 add_executable(liveness_gpu_preprocess_test liveness_gpu_preprocess_test.cpp)

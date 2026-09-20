@@ -22,7 +22,16 @@ camera_sample_*.jpg
 *.db-shm
 *.dpapi
 *.dpapi.new
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
 edge-config.local.json
+edge-config.*.local.json
 
 # Downloaded model binaries are machine-local artifacts. Track a manifest,
 # checksum, and license/provenance information instead of committing binaries.

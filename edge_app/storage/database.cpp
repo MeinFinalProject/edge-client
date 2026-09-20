@@ -1,3 +1,4 @@
+#include "security/local_data.hpp"
 #include "storage/database_internal.hpp"
 #include "storage/schema.hpp"
 namespace edge_app
@@ -5,8 +6,14 @@ namespace edge_app
 using namespace detail;
 Database::Database(std::filesystem::path const &file) : impl_(std::make_unique<Impl>())
 {
-    if (file.has_parent_path())
-        std::filesystem::create_directories(file.parent_path());
+    prepare_private_file(file);
+    for (auto suffix : {L"-journal", L"-wal", L"-shm"})
+    {
+        auto sidecar = file;
+        sidecar += suffix;
+        if (std::filesystem::exists(sidecar))
+            prepare_private_file(sidecar);
+    }
     auto u = file.u8string();
     check(sqlite3_open_v2(reinterpret_cast<char const *>(u.c_str()), &impl_->db,
                           SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr));

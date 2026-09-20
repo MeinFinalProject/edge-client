@@ -13,8 +13,9 @@ frontend and backend are maintained in separate repositories.
 The project is an active research prototype. Individual vision components and
 attendance orchestration now share a decision engine with the interactive demo.
 A native application adds local event durability, gallery persistence, and
-background synchronization. The backend API remains a proposal verified with
-local mocks; broader biometric evaluation remains in progress.
+background synchronization. Edge communication behavior is exercised with local
+mocks. ASP.NET Core backend development and actual end-to-end compatibility
+testing are deferred; broader biometric evaluation remains in progress.
 
 | Component | Current implementation |
 |---|---|
@@ -26,8 +27,10 @@ local mocks; broader biometric evaluation remains in progress.
 
 `ta_demo` keeps its enrollment and console events in memory. `edge_client` stores
 accepted events locally before upload and applies versioned galleries between
-frames. Both use `AttendanceProcessor` for biometric decisions. The API and
-offline setup are documented in [the edge v1 contract](contracts/edge-v1.md).
+frames. Both use `AttendanceProcessor` for biometric decisions. See
+[offline setup and recovery](#offline-first-application) below. Serialization and
+parsing live in [`wire_format.cpp`](edge_app/sync/wire_format.cpp); this task does
+not define or verify an ASP.NET Core API.
 
 ## Architecture
 
@@ -60,8 +63,9 @@ observations from the same capture.
 composes the subsequent PAD and recognition stages. The application supplies
 model paths, an identity gallery, and explicit recognition thresholds. Empty
 galleries are allowed at startup but cannot produce attendance events. A
-calibration ID or explicit development opt-in is required; there is no default
-production recognition threshold.
+calibration ID or explicit development opt-in is required by the vision runtime.
+Deployment configuration additionally requires a report reference and matching
+report/model checksums; there is no default production recognition threshold.
 
 Image preprocessing and model inference use the GPU path. Detection decoding,
 tracking, landmark transform fitting, similarity calculations, and application
@@ -194,7 +198,9 @@ Copy-Item edge-config.example.json edge-config.local.json
 
 The example disables networking and explicitly uses a development threshold.
 An empty gallery produces no events. Import a compatible snapshot or configure
-the future server endpoint as described in the [API contract](contracts/edge-v1.md).
+the future server endpoint when backend integration begins. Local import uses
+`--import-gallery <snapshot.json>`; accepted input is defined by the existing
+[`parse_gallery_file`](edge_app/sync/wire_format.cpp) implementation and its tests.
 `--validate-only` checks configuration, model files/hash (including the selected PAD checksum), and stored gallery
 metadata without starting camera/inference. Use Ctrl+C to stop capture.
 
@@ -202,6 +208,91 @@ Event UUIDs and occurrence times survive retries. Partial/missing receipts keep
 unacknowledged rows pending; 401/403 pauses requests until credentials change.
 The worker never accesses the vision runtime. Local COMMIT is required before
 reporting an event as persisted.
+
+If a database write or COMMIT fails, `PERSISTENCE_BLOCKED` reports the SQLite
+error code and number of uncommitted events. The coordinator retains one frame's
+batch in memory, including its original UUIDs, timestamps and gallery version.
+The application retries persistence once per second and accepts no new biometric
+decisions or gallery installations until that batch is saved. Camera acquisition
+may continue filling its latest-frame mailbox. Successful rows are individually
+reported as `COMMITTED`; `PERSISTENCE_RECOVERED` marks resumption.
+
+Biometric recognition and its cooldown are not durable attendance confirmation.
+Persistence retries do not reset cooldown or regenerate event IDs. If Ctrl+C
+stops the process with pending records, it exits unsuccessfully with
+`PERSISTENCE_INCOMPLETE`. A crash can lose records that exist only in RAM; they
+require recapture. Previously committed events survive process restart and remain
+eligible for upload. Repair capacity/permissions before restarting; do not delete
+the database to clear an error. Physical power-loss guarantees depend on storage
+hardware and are not established by the process-crash tests.
+
+### Deployment configuration
+
+[`edge-config.example.json`](edge-config.example.json) preserves research mode.
+[`edge-config.deployment.example.json`](edge-config.deployment.example.json) is an
+intentionally incomplete deployment template: it must fail validation unchanged.
+No deployment biometric thresholds or calibration results are supplied.
+
+```powershell
+Copy-Item edge-config.deployment.example.json edge-config.deployment.local.json
+# Fill the local copy using the reviewed calibration results, then validate:
+.\out\build\windows-x64\tools\Release\edge_client.exe --config edge-config.deployment.local.json --require-deployment --validate-only
+```
+
+Deployment requires `mode: "deployment"`, a device ID, calibrated numeric
+recognition threshold/margin, a nonempty calibration ID, a readable nonempty
+`calibration_report`, its lowercase SHA-256 in `calibration_report_sha256`, and
+the calibrated ArcFace model SHA-256 in `calibration_model_sha256`. It forbids
+`allow_uncalibrated_thresholds` and `allow_loopback_http`. `--require-deployment`
+also rejects accidentally passing the development config. An empty `base_url`
+still allows offline operation while the backend is unavailable.
+
+The report checksum and model binding establish which evidence was supplied;
+they cannot prove its scientific validity. A reviewer must verify the chosen
+thresholds/margin against that report, dataset split, evaluation and target
+conditions. An arbitrary calibration ID or a renamed file is not calibration.
+Changing model, operating point or experiment requires reviewing the evidence
+and local config together. `--validate-only` opens/migrates storage and applies
+file permissions, but starts no camera or inference and contacts no backend.
+
+### Local data protection
+
+Use a dedicated local directory on a filesystem with Windows ACL support.
+The examples use `data/`; a dedicated `%LOCALAPPDATA%\EdgeClient\data` directory
+under the research device account is preferable for operation outside a checkout.
+Set absolute paths in the local config when using it; environment-variable
+placeholders inside JSON are not expanded. Do not point data paths at a shared
+folder, profile root, checkout root, network share, junction or symbolic link.
+
+Startup/provisioning restricts the data directory and database/credential files
+to the current Windows user and SYSTEM, with inheritance protecting SQLite
+journals and temporary files. Existing credential ACLs are checked/applied at
+application startup. Permission failure stops initialization visibly; file paths
+with reparse points or multiple hard links are rejected. Use a directory devoted
+to Edge data because setting its inherited ACL can affect its other children.
+
+DPAPI protects credential contents for the Windows user. Provision through the
+hidden interactive prompt, never a token argument or a committed JSON file:
+
+```powershell
+.\out\build\windows-x64\tools\Release\edge_client.exe --provision-token data/deployment/device.dpapi
+```
+
+The database itself remains ordinary SQLite and contains biometric templates.
+**Enable and verify BitLocker/device encryption on volumes containing operational
+data and backups before collecting deployment data.** ACLs do not protect a disk
+removed from the device; disk encryption addresses that offline access threat.
+Follow the device's recovery-key policy. These changes do not enable encryption
+or claim to protect against an administrator, SYSTEM, or malware running as the
+same user. See [Microsoft's BitLocker overview](https://learn.microsoft.com/en-us/windows/security/operating-system-security/data-protection/bitlocker/)
+and [Windows object security descriptors](https://learn.microsoft.com/en-us/windows/win32/secauthz/creating-a-security-descriptor-for-a-new-object-in-c--).
+
+Production application logs contain operational status, opaque event UUIDs and
+error codes, not tokens, embedding vectors or event payloads. Research probes
+can export biometric observations: keep their CSV/logs and calibration reports
+inside ignored private directories. `.gitignore` excludes `data/`, calibration
+outputs, SQLite files/sidecars, DPAPI blobs and local configuration copies; this
+does not encrypt files or remove anything already tracked in Git.
 
 ### Capture labeled liveness observations
 
@@ -246,7 +337,7 @@ rejected inputs. Use `--help` for the complete option list.
 
 ## Validation
 
-The default CTest suite contains eleven tests: camera configuration/lifecycle, PAD
+The default CTest suite contains fourteen tests: camera configuration/lifecycle, PAD
 contracts, shared attendance decisions, durable storage/synchronization, and
 native HTTP against a loopback mock, wire format, credentials, and coordinator
 gallery/commit boundaries. Tests cover 100 offline events, forced
@@ -257,6 +348,15 @@ backoff across new events/restarts, 10,000-template replacement/rollback, HTTP
 error bodies, and inconclusive zero embedding aggregates. No production backend,
 webcam, or weights are required for these tests.
 
+Hardening coverage includes real SQLite write denial, a rejected COMMIT,
+`SQLITE_FULL` via a test-only page cap, recovery with stable IDs, partial frame
+batch failure, and receipt handling when the local acknowledgement COMMIT fails.
+ACL tests inspect the database, live rollback journal and rotated credential.
+Deployment tests reject dev opt-in, missing evidence and checksum mismatch.
+Communication tests include incomplete/corrupt galleries, non-finite embeddings,
+duplicate/partial/malformed receipts and retryable HTTP errors. These tests check
+Edge-side behavior only; no ASP.NET Core endpoint or compatibility is asserted.
+
 A separate hardware test checks GPU preprocessing on synthetic NV12 frames.
 Passing a model path additionally exercises actual GPU inference and transitions
 between rejected and accepted inputs:
@@ -265,9 +365,10 @@ between rejected and accepted inputs:
 .\out\build\windows-x64\tests\Release\liveness_gpu_preprocess_test.exe models/insightface/addons/liveness.onnx
 ```
 
-The current development-machine validation passed the Release build, all eleven
-CTest cases, and 13 synthetic GPU preprocessing cases, including actual model
-inference. These checks establish implementation behavior on that machine;
+The September 20 hardening validation passed the Release build and all fourteen
+CTest cases. The earlier GPU checkpoint passed 13 synthetic preprocessing cases,
+including actual model inference; it was not rerun for these non-vision changes.
+These checks establish implementation behavior on that machine;
 they do not establish PAD accuracy or complete attendance-system correctness.
 
 Broader subject/attack evaluation, calibrated recognition thresholds, real
@@ -290,8 +391,8 @@ Use a new output filename for each run. The tool does not open a camera.
 ├── CMakePresets.json        # Windows x64 configure, build, and test presets
 ├── vision_runtime/         # Camera, detection, tracking, PAD, recognition, orchestration
 ├── edge_app/               # Local storage, credentials, event contract, HTTP and worker
-├── contracts/              # Proposed API contract for the future backend
 ├── edge-config.example.json # Offline development configuration
+├── edge-config.deployment.example.json # Deployment template; requires calibration evidence
 ├── tools/                  # Application, diagnostic and interactive executables
 ├── tests/                  # Unit and hardware-dependent tests
 ├── models/                 # Artifact manifest and locally supplied weights

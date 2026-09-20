@@ -47,7 +47,7 @@ int main(int argc, char **argv)
     try
     {
         std::filesystem::path config_file = "edge-config.local.json", import_file;
-        bool validate_only = false;
+        bool validate_only = false, require_deployment = false;
         for (int i = 1; i < argc; ++i)
         {
             std::string arg = argv[i];
@@ -62,26 +62,39 @@ int main(int argc, char **argv)
                 import_file = value();
             else if (arg == "--validate-only")
                 validate_only = true;
+            else if (arg == "--require-deployment")
+                require_deployment = true;
             else if (arg == "--provision-token")
             {
                 auto file = value();
                 auto token = prompt_token();
+                struct EraseToken
+                {
+                    std::string &value;
+                    ~EraseToken()
+                    {
+                        SecureZeroMemory(value.data(), value.size());
+                    }
+                } erase{token};
                 edge_app::protect_token(file, token);
-                SecureZeroMemory(token.data(), token.size());
                 std::cout << "Credential protected for this Windows user.\n";
                 return 0;
             }
             else if (arg == "--help")
             {
-                std::cout << "edge_client [--config file] [--validate-only | --import-gallery file]\n"
-                             "edge_client --provision-token data/device.dpapi\n"
-                             "Paths in config are relative to its directory. Ctrl+C stops capture.\n";
+                std::cout
+                    << "edge_client [--config file] [--require-deployment] [--validate-only | --import-gallery file]\n"
+                       "edge_client --provision-token data/device.dpapi\n"
+                       "Paths in config are relative to its directory. Ctrl+C stops capture.\n";
                 return 0;
             }
             else
                 throw std::invalid_argument("Unknown option: " + arg);
         }
-        edge_app::EdgeApplication application(edge_app::load_config(config_file));
+        auto config = edge_app::load_config(config_file);
+        if (require_deployment && !config.deployment)
+            throw std::invalid_argument("--require-deployment rejects development configuration");
+        edge_app::EdgeApplication application(std::move(config));
         if (!import_file.empty())
         {
             application.import_gallery(import_file);

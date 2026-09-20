@@ -2,7 +2,9 @@
 #include "pipeline/biometric_attendance_runtime.hpp"
 #include "storage/gallery_repository.hpp"
 #include "storage/outbox_repository.hpp"
+#include <deque>
 #include <functional>
+#include <optional>
 
 namespace edge_app
 {
@@ -18,6 +20,17 @@ class AttendanceCoordinator
     void refresh_gallery(GalleryInstaller const &install);
     // Returns only after COMMIT; caller can then print success/wake the worker.
     AttendanceRecord record(vision_runtime::pipeline::AttendanceEvent const &event);
+    // Stage one complete frame before any COMMIT; retry without regenerating IDs.
+    void stage(std::vector<vision_runtime::pipeline::AttendanceEvent> const &events);
+    std::optional<AttendanceRecord> commit_next();
+    std::size_t pending_count() const noexcept
+    {
+        return pending_.size();
+    }
+    std::string pending_event_id() const
+    {
+        return pending_.empty() ? std::string{} : pending_.front().id;
+    }
     std::string const &gallery_version() const
     {
         return version_;
@@ -32,5 +45,6 @@ class AttendanceCoordinator
     GalleryRepository &gallery_;
     std::string device_, model_hash_, version_;
     std::size_t template_count_ = 0;
+    std::deque<AttendanceRecord> pending_;
 };
 } // namespace edge_app

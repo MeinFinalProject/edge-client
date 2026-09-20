@@ -6,6 +6,7 @@ add_library(edge_app_core STATIC
     domain/gallery_snapshot.cpp
     domain/uuid_v7.cpp
     security/device_credential.cpp
+    security/local_data.cpp
     security/model_hash.cpp
     storage/database.cpp
     storage/gallery_repository.cpp
@@ -22,4 +23,4 @@ add_library(edge_app_core STATIC
 target_compile_features(edge_app_core PUBLIC cxx_std_20)
 target_include_directories(edge_app_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(edge_app_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(edge_app_core PUBLIC vision_runtime PRIVATE winsqlite3 bcrypt crypt32 windowsapp)
+target_link_libraries(edge_app_core PUBLIC vision_runtime PRIVATE winsqlite3 bcrypt crypt32 windowsapp advapi32)

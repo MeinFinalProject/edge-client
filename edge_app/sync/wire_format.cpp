@@ -88,7 +88,7 @@ GallerySnapshot parse_gallery(std::string const &document, std::string const &et
     g.version = str(o, L"gallery_version");
     g.etag = etag;
     id(g.version);
-    if (g.etag.empty() || g.etag.size() > 256 || g.etag.find_first_of("\r\n") != std::string::npos)
+    if (g.etag.empty() || g.etag.size() > 256 || g.etag.find_first_of("\r\n\0", 0, 3) != std::string::npos)
         throw std::invalid_argument("Invalid gallery ETag");
     if (g.model_id != "insightface/w600k_r50" || g.model_sha256 != expected_hash)
         throw std::invalid_argument("Incompatible gallery model");
@@ -130,12 +130,19 @@ GallerySnapshot parse_gallery(std::string const &document, std::string const &et
 }
 std::string batch_payload(std::string const &device, std::vector<AttendanceRecord> const &rows)
 {
+    id(device);
     JsonObject body;
     text(body, L"device_id", device);
     number(body, L"schema_version", 1);
     JsonArray events;
     for (auto const &r : rows)
-        events.Append(JsonObject::Parse(winrt::to_hstring(r.payload)));
+    {
+        auto event = JsonObject::Parse(winrt::to_hstring(r.payload));
+        if (event.GetNamedNumber(L"schema_version") != 1 || str(event, L"event_id") != r.id ||
+            str(event, L"device_id") != device)
+            throw std::invalid_argument("Outbox payload does not match its event/device metadata");
+        events.Append(event);
+    }
     body.Insert(L"events", events);
     return winrt::to_string(body.Stringify());
 }

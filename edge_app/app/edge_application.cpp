@@ -1,10 +1,13 @@
 #include "app/edge_application.hpp"
 #include "app/attendance_coordinator.hpp"
+#include "security/local_data.hpp"
+#include "storage/storage_error.hpp"
 #include "sync/sync_service.hpp"
 #include "sync/sync_worker.hpp"
 #include "sync/wire_format.hpp"
 #include <ostream>
 #include <stdexcept>
+#include <thread>
 
 namespace edge_app
 {
@@ -21,6 +24,8 @@ struct EdgeApplication::Impl
         : config(std::move(c)), model_hash(verify_model_files(config)), database(config.database), outbox(database),
           gallery(database), coordinator(outbox, gallery, config.device_id, model_hash)
     {
+        if (std::filesystem::exists(config.credential_file))
+            prepare_private_file(config.credential_file);
     }
     std::unique_ptr<Transport> make_transport() const
     {
@@ -35,6 +40,9 @@ struct EdgeApplication::Impl
                << "; templates=" << snapshot.templates.size() << '\n';
         if (config.vision.allow_uncalibrated_thresholds)
             output << "DEVELOPMENT: recognition thresholds are not validated for deployment.\n";
+        if (config.deployment)
+            output
+                << "DEPLOYMENT: report integrity/model binding checked; calibration validity requires human review.\n";
     }
 };
 EdgeApplication::EdgeApplication(ApplicationConfig config) : impl_(std::make_unique<Impl>(std::move(config)))
@@ -70,8 +78,40 @@ void EdgeApplication::run(std::atomic_bool const &stopping, std::ostream &output
     runtime.start();
     output << "Capture started. Empty gallery waits for import/sync. Ctrl+C to stop.\n";
     auto status_due = std::chrono::steady_clock::now();
+    auto persist_due = status_due;
+    bool persistence_blocked = false;
     while (!stopping)
     {
+        if (app.coordinator.pending_count())
+        {
+            if (std::chrono::steady_clock::now() < persist_due)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+            try
+            {
+                while (auto record = app.coordinator.commit_next())
+                {
+                    output << "COMMITTED event_id=" << record->id << '\n' << std::flush;
+                    if (worker)
+                        worker->wake();
+                }
+                if (persistence_blocked)
+                    output << "PERSISTENCE_RECOVERED; biometric processing resumed.\n" << std::flush;
+                persistence_blocked = false;
+            }
+            catch (StorageError const &error)
+            {
+                persistence_blocked = true;
+                output << "PERSISTENCE_BLOCKED sqlite_code=" << error.code()
+                       << " uncommitted=" << app.coordinator.pending_count()
+                       << "; retry in 1s; no new biometric decisions.\n"
+                       << std::flush;
+                persist_due = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            }
+            continue;
+        }
         if (sync && sync->take_gallery_dirty())
         {
             app.coordinator.refresh_gallery(install);
@@ -79,13 +119,7 @@ void EdgeApplication::run(std::atomic_bool const &stopping, std::ostream &output
         }
         auto frame = runtime.wait_for_frame(std::chrono::milliseconds(1000));
         if (frame)
-            for (auto const &event : frame->attendance_events)
-            {
-                auto record = app.coordinator.record(event);
-                output << "COMMITTED event_id=" << record.id << " frame=" << event.camera_frame_id << '\n';
-                if (worker)
-                    worker->wake();
-            }
+            app.coordinator.stage(frame->attendance_events);
         auto now = std::chrono::steady_clock::now();
         if (now >= status_due)
         {
@@ -95,5 +129,8 @@ void EdgeApplication::run(std::atomic_bool const &stopping, std::ostream &output
     }
     runtime.stop();
     worker.reset();
+    if (app.coordinator.pending_count())
+        throw std::runtime_error("PERSISTENCE_INCOMPLETE: stopping with uncommitted attendance in memory; "
+                                 "these events are NOT recorded and require recapture after recovery");
 }
 } // namespace edge_app

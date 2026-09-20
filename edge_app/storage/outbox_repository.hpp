@@ -11,6 +11,8 @@ class OutboxRepository
     {
     }
     void enqueue(AttendanceRecord const &record);
+    // Retry an uncertain local COMMIT with the same immutable record.
+    void ensure_enqueued(AttendanceRecord const &record);
     std::vector<AttendanceRecord> due(std::int64_t now_ms, std::size_t limit = 32);
     void retry(std::vector<AttendanceRecord> const &records, std::int64_t next_ms, std::string const &reason);
     void acknowledge(std::vector<DeliveryReceipt> const &receipts);

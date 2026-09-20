@@ -22,5 +22,6 @@ class Database
     std::unique_ptr<Impl> impl_;
     friend class OutboxRepository;
     friend class GalleryRepository;
+    friend struct DatabaseTestAccess;
 };
 } // namespace edge_app

@@ -1,6 +1,7 @@
 #pragma once
 // Internal SQLite RAII helpers; include only from storage .cpp files.
 #include "storage/database.hpp"
+#include "storage/storage_error.hpp"
 #include <mutex>
 #include <stdexcept>
 #include <winsqlite/winsqlite3.h>
@@ -21,7 +22,7 @@ namespace detail
 inline void check(int rc)
 {
     if (rc != SQLITE_OK && rc != SQLITE_DONE && rc != SQLITE_ROW)
-        throw std::runtime_error("SQLite operation failed: " + std::to_string(rc));
+        throw StorageError(rc);
 }
 inline void sql(sqlite3 *d, char const *q)
 {

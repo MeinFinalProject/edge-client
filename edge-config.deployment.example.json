@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "mode": "deployment",
+  "device_id": "",
+  "base_url": "",
+  "database": "data/deployment/edge.db",
+  "credential_file": "data/deployment/device.dpapi",
+  "scrfd_model": "models/insightface/buffalo_sc/det_500m.onnx",
+  "arcface_model": "models/insightface/buffalo_l/w600k_r50.onnx",
+  "pad_model": "models/insightface/addons/liveness.onnx",
+  "recognition_threshold": null,
+  "recognition_min_margin": null,
+  "calibration_id": "",
+  "calibration_report": "",
+  "calibration_report_sha256": "",
+  "calibration_model_sha256": "",
+  "allow_uncalibrated_thresholds": false,
+  "allow_loopback_http": false
+}

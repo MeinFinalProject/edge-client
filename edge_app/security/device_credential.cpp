@@ -1,4 +1,5 @@
 #include "security/device_credential.hpp"
+#include "security/local_data.hpp"
 #include <Windows.h>
 #include <fstream>
 #include <iterator>
@@ -39,10 +40,10 @@ void protect_token(std::filesystem::path const &file, std::string const &token)
     if (!CryptProtectData(&input, L"Edge client device token", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN,
                           &out.b))
         throw std::runtime_error("DPAPI protection failed");
-    if (file.has_parent_path())
-        std::filesystem::create_directories(file.parent_path());
+    prepare_private_file(file);
     auto temporary = file;
     temporary += L".new";
+    prepare_private_file(temporary);
     {
         std::ofstream f(temporary, std::ios::binary | std::ios::trunc);
         f.write(reinterpret_cast<char *>(out.b.pbData), out.b.cbData);

@@ -29,6 +29,41 @@ void OutboxRepository::enqueue(AttendanceRecord const &r)
     s.step();
     t.commit();
 }
+void OutboxRepository::ensure_enqueued(AttendanceRecord const &r)
+{
+    std::lock_guard lock(database_.impl_->mutex);
+    Transaction tx(database_.impl_->db);
+    {
+        Statement existing(database_.impl_->db, "SELECT payload,occurred_ms FROM attendance_outbox WHERE event_id=?");
+        existing.text(1, r.id);
+        if (existing.step())
+        {
+            if (existing.string(0) != r.payload || sqlite3_column_int64(existing.s, 1) != r.occurred_ms)
+                throw std::runtime_error("Conflicting local event ID");
+            tx.commit();
+            return;
+        }
+    }
+    {
+        // The sync worker may already have retained a permanent rejection after
+        // an uncertain local COMMIT. Do not resurrect it into the upload queue.
+        Statement rejected(database_.impl_->db, "SELECT payload FROM dead_letter WHERE event_id=?");
+        rejected.text(1, r.id);
+        if (rejected.step())
+        {
+            if (rejected.string(0) != r.payload)
+                throw std::runtime_error("Conflicting retained event ID");
+            tx.commit();
+            return;
+        }
+    }
+    Statement insert(database_.impl_->db, "INSERT INTO attendance_outbox(event_id,payload,occurred_ms) VALUES(?,?,?)");
+    insert.text(1, r.id);
+    insert.text(2, r.payload);
+    insert.integer(3, r.occurred_ms);
+    insert.step();
+    tx.commit();
+}
 std::vector<AttendanceRecord> OutboxRepository::due(std::int64_t now, std::size_t limit)
 {
     std::lock_guard lock(database_.impl_->mutex);

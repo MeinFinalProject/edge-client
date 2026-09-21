@@ -13,9 +13,10 @@ frontend and backend are maintained in separate repositories.
 The project is an active research prototype. Individual vision components and
 attendance orchestration now share a decision engine with the interactive demo.
 A native application adds local event durability, gallery persistence, and
-background synchronization. Edge communication behavior is exercised with local
-mocks. ASP.NET Core backend development and actual end-to-end compatibility
-testing are deferred; broader biometric evaluation remains in progress.
+background synchronization. Unit tests exercise failure handling with local
+mocks; a separate native integration test connects these same storage and sync
+components to the ASP.NET Core backend over HTTPS. Broader biometric evaluation
+remains in progress.
 
 | Component | Current implementation |
 |---|---|
@@ -29,8 +30,9 @@ testing are deferred; broader biometric evaluation remains in progress.
 accepted events locally before upload and applies versioned galleries between
 frames. Both use `AttendanceProcessor` for biometric decisions. See
 [offline setup and recovery](#offline-first-application) below. Serialization and
-parsing live in [`wire_format.cpp`](edge_app/sync/wire_format.cpp); this task does
-not define or verify an ASP.NET Core API.
+parsing live in [`wire_format.cpp`](edge_app/sync/wire_format.cpp). The companion
+[backend](https://github.com/MeinFinalProject/backend) implements these contracts
+under `/api/v1`.
 
 ## Architecture
 
@@ -197,8 +199,8 @@ Copy-Item edge-config.example.json edge-config.local.json
 ```
 
 The example disables networking and explicitly uses a development threshold.
-An empty gallery produces no events. Import a compatible snapshot or configure
-the future server endpoint when backend integration begins. Local import uses
+An empty gallery produces no events. Import a compatible snapshot or use the
+[backend development setup](#backend-development) below. Local import uses
 `--import-gallery <snapshot.json>`; accepted input is defined by the existing
 [`parse_gallery_file`](edge_app/sync/wire_format.cpp) implementation and its tests.
 `--validate-only` checks configuration, model files/hash (including the selected PAD checksum), and stored gallery
@@ -225,6 +227,99 @@ require recapture. Previously committed events survive process restart and remai
 eligible for upload. Repair capacity/permissions before restarting; do not delete
 the database to clear an error. Physical power-loss guarantees depend on storage
 hardware and are not established by the process-crash tests.
+
+### Configuration reference
+
+`edge_client --config <file>` loads the selected JSON file. For local backend
+testing, edit `edge-config.backend.local.json`; the tracked
+`edge-config.example.json` is a template. Paths resolve relative to the JSON
+file's directory unless absolute. Restart Edge after editing its configuration.
+
+| JSON fields | Responsibility |
+| --- | --- |
+| `schema_version`, `mode` | Configuration format and development/deployment validation |
+| `device_id`, `base_url` | Registered device identity and versioned API address |
+| `database`, `credential_file` | SQLite storage and the DPAPI-protected credential file |
+| `scrfd_model`, `arcface_model`, `pad_model` | Local detection, recognition and liveness model files |
+| `recognition_threshold`, `recognition_min_margin` | Identity-match acceptance and ambiguity threshold |
+| `calibration_id`, `allow_uncalibrated_thresholds` | Calibration reference or explicit development opt-in |
+| `allow_loopback_http` | Plain HTTP opt-in for loopback tests; keep false for backend HTTPS |
+
+These are the currently supported operator settings. Additional runtime policies
+are defined in C++ and are **not read from JSON**:
+
+| Policy | Current setting and source |
+| --- | --- |
+| Camera | Index 0, requested 1280 x 720 at 30 FPS; actual format depends on the device. [`CameraConfig`](vision_runtime/camera/camera.hpp) |
+| Detection/tracking | SCRFD candidate threshold 0.10 in [`load_config`](edge_app/app/application_config.cpp), with [`ByteTrackConfig`](vision_runtime/bytetrack/bytetrack.hpp) association defaults |
+| Biometric quality | Detection score at least 0.50, face at least 64 x 64 pixels, maximum alignment RMSE 8. [`BiometricAttendanceConfig`](vision_runtime/pipeline/biometric_attendance_runtime.hpp) |
+| PAD and recognition retries | PAD voting 2 of 3; recognition attempts/evidence policy and 30-second identity cooldown. [`BiometricAttendanceConfig`](vision_runtime/pipeline/biometric_attendance_runtime.hpp) |
+| Gallery polling | 60 seconds after a successful request. [`GallerySync`](edge_app/sync/gallery_sync.cpp) |
+
+Changing these C++ policies requires rebuilding. Adding an arbitrary JSON field
+does not configure the corresponding runtime policy. PAD model checksums and
+preprocessing are part of the model contract, rather than operator switches.
+The deployment template additionally requires calibration evidence and checksums.
+
+### Backend development
+
+Keep the [backend](https://github.com/MeinFinalProject/backend) in a separate
+checkout and follow its database and enrollment-worker setup. Start its HTTPS
+launch profile, then run this command from the **backend checkout**:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/Initialize-EdgeDevelopment.ps1 -EdgeSource 'C:\path\to\edge-client'
+```
+
+Setup checks the shared ArcFace checksum, provisions a development device, and
+creates the ignored `edge-config.backend.local.json` here. It uses
+`https://localhost:7143/api/v1`, a Windows-user DPAPI credential in the backend's
+private `.local` directory, and a separate SQLite database under
+`data/backend-development/edge-dev-01/`. Repeated setup preserves the credential,
+profile and outbox. Keep both checkouts at their configured locations and run
+them as the same Windows user. HTTPS certificate validation remains enabled.
+
+From the **Edge checkout**, validate the profile and start capture:
+
+```powershell
+.\out\build\windows-x64\tools\Release\edge_client.exe --config edge-config.backend.local.json --validate-only
+.\out\build\windows-x64\tools\Release\edge_client.exe --config edge-config.backend.local.json
+```
+
+Validation starts no camera and sends no network request. Capture uses the
+existing `edge_client` runtime, including PAD, gallery polling and outbox retries.
+Run one Edge process per database; Ctrl+C stops it. Once a gallery is cached,
+capture can continue while the backend is unavailable. Do not delete the database
+to simulate offline operation: stop the backend, then restart it to let pending
+events drain. Gallery polling normally runs every 60 seconds.
+
+For everyday use, run the executable directly; the setup helper is not a runtime
+dependency. Enrollment photos can be selected directly in the backend's Swagger
+UI using `POST /api/v1/biometric-enrollments/{id}/samples/upload`. Follow the
+backend README's **Manual walkthrough with Swagger** for enrollment, approval,
+gallery synchronization and academic attendance checks.
+
+For an optional automated test without camera capture, run from the **backend checkout**:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/Test-EdgeIntegration.ps1 -EdgeSource 'C:\path\to\edge-client'
+```
+
+This links the actual Edge HTTP, wire-format, SQLite and synchronization source
+into a native probe. It checks authentication, gallery download/persistence,
+ETag `304`, offline persistence, retry state after database reopening, and
+duplicate delivery following a lost acknowledgement. Successful requests reach
+the running ASP.NET Core API and PostgreSQL; connection failure and acknowledgement
+loss are injected by the probe. Its temporary database is separate from the
+capture database. Each run stores one synthetic `backend-contract-probe` raw event
+in the development backend; it does not enroll a person or award attendance.
+
+Real recognition requires approved biometric enrollment and a synchronized
+nonempty gallery. Academic attendance additionally requires approved KRS, an
+actual teaching session, and the device's classroom assignment established before
+the observation. Inspect the backend event decision and session roster: an
+`accepted` receipt alone means the raw event was stored. The generated profile is
+explicitly for development, with uncalibrated recognition thresholds.
 
 ### Deployment configuration
 
@@ -355,7 +450,8 @@ ACL tests inspect the database, live rollback journal and rotated credential.
 Deployment tests reject dev opt-in, missing evidence and checksum mismatch.
 Communication tests include incomplete/corrupt galleries, non-finite embeddings,
 duplicate/partial/malformed receipts and retryable HTTP errors. These tests check
-Edge-side behavior only; no ASP.NET Core endpoint or compatibility is asserted.
+Edge-side behavior only. The separate backend integration command above checks
+the live ASP.NET Core contract and local recovery behavior.
 
 A separate hardware test checks GPU preprocessing on synthetic NV12 frames.
 Passing a model path additionally exercises actual GPU inference and transitions
@@ -365,14 +461,12 @@ between rejected and accepted inputs:
 .\out\build\windows-x64\tests\Release\liveness_gpu_preprocess_test.exe models/insightface/addons/liveness.onnx
 ```
 
-The September 20 hardening validation passed the Release build and all fourteen
-CTest cases. The earlier GPU checkpoint passed 13 synthetic preprocessing cases,
-including actual model inference; it was not rerun for these non-vision changes.
-These checks establish implementation behavior on that machine;
-they do not establish PAD accuracy or complete attendance-system correctness.
+Unit, integration and GPU checks establish implementation behavior on the test
+machine; they do not establish PAD accuracy or complete attendance-system
+correctness under field conditions.
 
 Broader subject/attack evaluation, calibrated recognition thresholds, real
-walk-through time-to-verified measurements, and production backend integration
+walk-through time-to-verified measurements, and deployment validation
 remain outstanding. Synthetic benchmarks measure service time, not biometric
 accuracy. `evaluate_many` still evaluates faces serially; true batching and GPU
 gallery matching remain measurement-driven optimizations.

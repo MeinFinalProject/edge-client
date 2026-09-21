@@ -19,9 +19,12 @@ void SyncService::set_token(std::string const &token)
 }
 void SyncService::step(std::int64_t now)
 {
+    // A newly authenticated channel proves a re-enabled device can retry its unchanged credential.
+    if (authenticated_connection_.exchange(false)) blocked_ = false;
     if (blocked_ || token_.empty())
         return;
     RetryClock clock(now);
+    if (refresh_requested_.exchange(false)) gallery_.request_refresh();
     if (attendance_.step(now) == SyncResult::AuthenticationBlocked)
     {
         blocked_ = true;

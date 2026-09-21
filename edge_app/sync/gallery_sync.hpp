@@ -17,6 +17,11 @@ class GallerySync
     {
         return dirty_.exchange(false);
     }
+    void request_refresh()
+    {
+        // Notifications may shorten normal polling, but never bypass failure backoff / Retry-After.
+        if (gallery_attempts_ == 0) gallery_due_ = 0;
+    }
 
   private:
     GalleryRepository &gallery_;

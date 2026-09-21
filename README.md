@@ -23,7 +23,7 @@ remains in progress.
 | Tracking runtime | Camera capture, SCRFD detection, and ByteTrack tracking |
 | Attendance runtime | Landmark/quality checks, PAD voting, bounded recognition retry, gallery matching, and identity cooldown |
 | Interactive demo | Supervised enrollment and preview using the shared PAD/recognition decision engine |
-| Edge application | SQLite outbox/gallery, UUIDv7 events, DPAPI credentials, and background HTTP synchronization |
+| Edge application | SQLite outbox/gallery, UUIDv7 events, DPAPI credentials, HTTP synchronization, and native operational WebSocket |
 | Evaluation tools | Component diagnostics, model inspection, and labeled liveness capture to CSV |
 
 `ta_demo` keeps its enrollment and console events in memory. `edge_client` stores
@@ -80,7 +80,7 @@ The application code is organized by responsibility:
 edge_app/
   domain/    Attendance records, gallery snapshots, UUID generation
   storage/   Shared Database, schema, outbox and gallery repositories
-  sync/      HTTP/wire format, upload, gallery sync, retry, worker and network hints
+  sync/      HTTP/outbox sync, operational WebSocket, retry and network hints
   security/  Device credentials and model checksums
   app/       Configuration, attendance coordinator and application lifecycle
 ```
@@ -207,7 +207,7 @@ An empty gallery produces no events. Import a compatible snapshot or use the
 metadata without starting camera/inference. Use Ctrl+C to stop capture.
 
 Event UUIDs and occurrence times survive retries. Partial/missing receipts keep
-unacknowledged rows pending; 401/403 pauses requests until credentials change.
+unacknowledged rows pending; 401/403 pauses requests until credentials change or a newly authenticated operational connection confirms access has been restored.
 The worker never accesses the vision runtime. Local COMMIT is required before
 reporting an event as persisted.
 
@@ -432,7 +432,19 @@ rejected inputs. Use `--help` for the complete option list.
 
 ## Validation
 
-The default CTest suite contains fourteen tests: camera configuration/lifecycle, PAD
+### Operational connection
+
+`edge_client` automatically opens `/device-channel` relative to its configured API base URL using Windows `MessageWebSocket` (C++/WinRT). The same DPAPI credential authenticates HTTPS and WSS. No new runtime configuration, SignalR C++ library or broker is needed. This independent worker sends ten-second operational reports; it never delivers attendance or changes the active gallery.
+
+Server reconciliation hints wake the HTTP gallery worker while preserving failure backoff and `Retry-After`. Normal sixty-second ETag polling continues without WebSocket. Reconnect also reconciles missed changes. The vision owner reports a gallery version only after `AttendanceCoordinator` and `GalleryMatcher` successfully install it; a downloaded SQLite snapshot is not an installation acknowledgement. Failed installation retains the previous active gallery, reports `gallery_error`, and retries after five seconds.
+
+Telemetry contains frame age, runtime state, installed gallery version/model/count and outbox counts. It contains no images, embeddings, identity IDs or attendance payloads. Frame age advances even when capture stops delivering frames. Persistence failure reports `persistence_blocked`. Reconnection uses bounded exponential delay with jitter, reloads the credential file, and detects missing server acknowledgements after 35 seconds. Network operations are cancellable and bounded; shutdown joins the worker before repositories are destroyed. WebSocket failure leaves local recognition, SQLite durability, HTTP retries and gallery polling independent.
+
+The administrator portal distinguishes enabled access, connectivity, health and attendance readiness. Readiness is an operational indication, not evidence of calibrated thresholds or successful physical recognition.
+
+### Automated coverage
+
+The default CTest suite contains fifteen tests: camera configuration/lifecycle, PAD
 contracts, shared attendance decisions, durable storage/synchronization, and
 native HTTP against a loopback mock, wire format, credentials, and coordinator
 gallery/commit boundaries. Tests cover 100 offline events, forced
@@ -442,6 +454,8 @@ size limits. Additional regressions cover database v1-to-v2 migration, endpoint
 backoff across new events/restarts, 10,000-template replacement/rollback, HTTP
 error bodies, and inconclusive zero embedding aggregates. No production backend,
 webcam, or weights are required for these tests.
+
+The operational-channel test checks cancellation during failed connection, unchanged durable attendance payloads, prompt gallery polling, preserved `Retry-After`, and recovery after device access is restored. The backend repository builds `edge_realtime_probe` from this checkout for the frontend's optional Windows cross-repository test. That probe uses controlled telemetry and synthetic test gallery data; it does not open a camera or establish biometric accuracy.
 
 Hardening coverage includes real SQLite write denial, a rejected COMMIT,
 `SQLITE_FULL` via a test-only page cap, recovery with stable IDs, partial frame

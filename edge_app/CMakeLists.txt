@@ -12,6 +12,7 @@ add_library(edge_app_core STATIC
     storage/gallery_repository.cpp
     storage/outbox_repository.cpp
     sync/attendance_sync.cpp
+    sync/device_channel.cpp
     sync/gallery_sync.cpp
     sync/http_client.cpp
     sync/network_watcher.cpp

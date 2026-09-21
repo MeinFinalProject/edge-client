@@ -56,6 +56,7 @@ add_edge_test(edge_credential_test security/device_credential_test.cpp edge.cred
 add_edge_test(edge_wire_format_test sync/wire_format_test.cpp edge.wire_format)
 add_edge_test(attendance_coordinator_test attendance/attendance_coordinator_test.cpp attendance.coordinator)
 add_edge_test(edge_sync_service_test sync/sync_service_test.cpp edge.sync)
+add_edge_test(edge_device_channel_test sync/device_channel_test.cpp edge.device_channel)
 add_edge_test(edge_offline_recovery_test failure/offline_recovery_test.cpp edge.failure)
 add_edge_test(edge_http_test sync/http_client_test.cpp edge.http_loopback)
 add_edge_test(edge_persistence_recovery_test failure/persistence_recovery_test.cpp edge.persistence_recovery)

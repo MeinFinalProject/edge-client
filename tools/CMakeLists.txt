@@ -29,11 +29,15 @@ add_vision_tool(arcface_probe arcface_probe.cpp)
 add_vision_tool(ta_demo ta_demo.cpp)
 target_link_libraries(ta_demo
     PRIVATE
+        edge_app_core
         d3d11
         dxgi
         user32
         gdi32
 )
+
+add_vision_tool(check_ta_demo check_ta_demo.cpp)
+target_link_libraries(check_ta_demo PRIVATE edge_app_core)
 
 add_vision_tool(env_probe env_probe.cpp)
 target_link_libraries(env_probe

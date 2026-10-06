@@ -8,8 +8,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -110,6 +110,7 @@ struct AttendanceEvent {
     float similarity_margin = 0.0F;
 
     float pad_median_p_real = 0.0F;
+    float pad_median_margin_p_real = 0.0F;
 };
 
 struct BiometricAttendanceTiming {
@@ -135,7 +136,7 @@ struct BiometricAttendanceFrame {
 // The class intentionally does not write HTTP/SQLite itself. AttendanceEvent is
 // the boundary consumed by edge_app for local persistence and synchronization.
 class BiometricAttendanceRuntime {
-public:
+  public:
     explicit BiometricAttendanceRuntime(BiometricAttendanceConfig config);
     ~BiometricAttendanceRuntime();
 
@@ -153,9 +154,8 @@ public:
     BiometricAttendanceRuntime& start();
     void stop() noexcept;
 
-    [[nodiscard]] std::optional<BiometricAttendanceFrame> wait_for_frame(
-        std::chrono::milliseconds timeout = std::chrono::milliseconds{1000}
-    );
+    [[nodiscard]] std::optional<BiometricAttendanceFrame>
+    wait_for_frame(std::chrono::milliseconds timeout = std::chrono::milliseconds{1000});
 
     // Clears Track evidence; keeps the gallery and unexpired identity cooldowns.
     void reset_session();
@@ -163,7 +163,7 @@ public:
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] BiometricAttendanceConfig config() const;
 
-private:
+  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

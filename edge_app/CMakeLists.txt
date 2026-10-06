@@ -1,4 +1,6 @@
-# One native library; folders separate responsibilities, not processes or threads.
+# Memerintahkan kompilator untuk mengambil seluruh file .cpp di bawah ini, 
+# mengkompilasinya secara paralel, lalu membungkusnya menjadi satu kesatuan Static Library 
+# (di Windows berformat .lib).
 add_library(edge_app_core STATIC
     app/application_config.cpp
     app/attendance_coordinator.cpp
@@ -21,7 +23,11 @@ add_library(edge_app_core STATIC
     sync/sync_worker.cpp
     sync/wire_format.cpp
 )
+
+# Mengunci standar bahasa yang digunakan di dalam modul ini wajib menggunakan C++20.
 target_compile_features(edge_app_core PUBLIC cxx_std_20)
+
+
 target_include_directories(edge_app_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(edge_app_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(edge_app_core PUBLIC vision_runtime PRIVATE winsqlite3 bcrypt crypt32 windowsapp advapi32)

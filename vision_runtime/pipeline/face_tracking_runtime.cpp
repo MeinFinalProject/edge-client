@@ -26,10 +26,8 @@ void validate_config(FaceTrackingConfig const& cfg) {
         throw std::invalid_argument(
             "SCRFD score_threshold terlalu tinggi untuk ByteTrack: detector=" +
             std::to_string(cfg.scrfd.score_threshold) +
-            ", ByteTrack low_threshold=" +
-            std::to_string(cfg.bytetrack.low_threshold) +
-            ". Gunakan SCRFD candidate threshold <= ByteTrack low_threshold."
-        );
+            ", ByteTrack low_threshold=" + std::to_string(cfg.bytetrack.low_threshold) +
+            ". Gunakan SCRFD candidate threshold <= ByteTrack low_threshold.");
     }
 
     if (cfg.bytetrack.low_threshold >= cfg.bytetrack.track_threshold) {
@@ -57,9 +55,7 @@ struct FaceTrackingRuntime::Impl {
     bool started = false;
 
     explicit Impl(FaceTrackingConfig config)
-        : cfg(validated_config(std::move(config))),
-          camera(cfg.camera),
-          detector(cfg.scrfd),
+        : cfg(validated_config(std::move(config))), camera(cfg.camera), detector(cfg.scrfd),
           tracker(cfg.bytetrack) {}
 
     FaceTrackingFrame process(GpuFrame frame) {
@@ -111,9 +107,8 @@ void FaceTrackingRuntime::stop() noexcept {
     impl_->last_camera_frame_id = 0;
 }
 
-std::optional<FaceTrackingFrame> FaceTrackingRuntime::wait_for_frame(
-    std::chrono::milliseconds timeout
-) {
+std::optional<FaceTrackingFrame>
+FaceTrackingRuntime::wait_for_frame(std::chrono::milliseconds timeout) {
     if (!impl_->started) {
         throw std::logic_error("FaceTrackingRuntime::start() harus dipanggil dahulu");
     }
@@ -140,6 +135,5 @@ FaceTrackingConfig FaceTrackingRuntime::config() const {
 std::uint64_t FaceTrackingRuntime::failed_camera_reads() const noexcept {
     return impl_->camera.failed_reads();
 }
-
 
 } // namespace vision_runtime::pipeline

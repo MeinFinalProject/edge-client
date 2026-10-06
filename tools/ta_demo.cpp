@@ -1,7 +1,10 @@
 #include "arcface/arcface.hpp"
 #include "liveness/liveness.hpp"
-#include "pipeline/face_tracking_runtime.hpp"
 #include "pipeline/attendance_processor.hpp"
+#include "pipeline/face_tracking_runtime.hpp"
+#include "storage/database.hpp"
+#include "storage/outbox_repository.hpp"
+#include "sync/wire_format.hpp"
 
 #include <Windows.h>
 #include <d3d11.h>
@@ -51,10 +54,18 @@ std::filesystem::path executable_directory() {
     return std::filesystem::path{buffer}.parent_path();
 }
 
-std::filesystem::path find_upwards(
-    std::filesystem::path root,
-    std::filesystem::path const& rel
-) {
+std::filesystem::path demo_database_path() {
+    std::wstring local_app_data(32768, L'\0');
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", local_app_data.data(),
+                                            static_cast<DWORD>(local_app_data.size()));
+    if (n == 0 || n >= local_app_data.size()) {
+        throw std::runtime_error("LOCALAPPDATA is unavailable");
+    }
+    local_app_data.resize(n);
+    return std::filesystem::path{local_app_data} / L"TA" / L"ta_demo" / L"attendance.db";
+}
+
+std::filesystem::path find_upwards(std::filesystem::path root, std::filesystem::path const& rel) {
     for (int i = 0; i < 12; ++i) {
         auto candidate = root / rel;
         if (std::filesystem::exists(candidate)) {
@@ -124,18 +135,17 @@ Args parse_args(int argc, char** argv) {
             args.pad_disabled = true;
             args.pad_monitor = false;
         } else if (token == "--help" || token == "-h") {
-            std::cout
-                << "ta_demo v4.8 options:\n"
-                << "  --name <label>                 default ENROLLED\n"
-                << "  --identity-threshold <float>  default 0.75 (DEMO ONLY)\n"
-                << "  --enroll <samples>             default 12\n"
-                << "  --arc-every <frames>           default 5\n"
-                << "  --pad-every <frames>           default 10\n"
-                << "  --pad-monitor                   start with PAD raw-score monitor ON\n"
-                << "  --no-pad                        disable PAD module entirely\n"
-                << "  --scrfd <det_500m.onnx>\n"
-                << "  --pad <liveness.onnx>          selected InsightFace addon\n"
-                << "  --arcface <w600k_r50.onnx>\n";
+            std::cout << "ta_demo v4.8 options:\n"
+                      << "  --name <label>                 default ENROLLED\n"
+                      << "  --identity-threshold <float>  default 0.75 (DEMO ONLY)\n"
+                      << "  --enroll <samples>             default 12\n"
+                      << "  --arc-every <frames>           default 5\n"
+                      << "  --pad-every <frames>           default 10\n"
+                      << "  --pad-monitor                   start with PAD raw-score monitor ON\n"
+                      << "  --no-pad                        disable PAD module entirely\n"
+                      << "  --scrfd <det_500m.onnx>\n"
+                      << "  --pad <liveness.onnx>          selected InsightFace addon\n"
+                      << "  --arcface <w600k_r50.onnx>\n";
             std::exit(0);
         } else {
             throw std::runtime_error("Unknown argument: " + token);
@@ -151,7 +161,8 @@ Args parse_args(int argc, char** argv) {
         if (args.scrfd_model.empty()) args.scrfd_model = find_upwards(exe, rel);
     }
     if (args.pad_model.empty()) {
-        const auto rel = std::filesystem::path{L"models"} / vision_runtime::liveness::kModelRelativePath;
+        const auto rel =
+            std::filesystem::path{L"models"} / vision_runtime::liveness::kModelRelativePath;
         args.pad_model = find_upwards(cwd, rel);
         if (args.pad_model.empty()) args.pad_model = find_upwards(exe, rel);
     }
@@ -167,13 +178,17 @@ Args parse_args(int argc, char** argv) {
     if (args.arcface_model.empty() || !std::filesystem::exists(args.arcface_model)) {
         throw std::runtime_error("w600k_r50.onnx not found; pass --arcface <path>");
     }
-    if (!args.pad_disabled && (args.pad_model.empty() || !std::filesystem::exists(args.pad_model))) {
-        throw std::runtime_error("Selected liveness.onnx not found; pass --pad <path> (or explicit --no-pad for diagnostics)");
+    if (!args.pad_disabled &&
+        (args.pad_model.empty() || !std::filesystem::exists(args.pad_model))) {
+        throw std::runtime_error("Selected liveness.onnx not found; pass --pad <path> (or explicit "
+                                 "--no-pad for diagnostics)");
     }
-    if (!std::isfinite(args.identity_threshold) || args.identity_threshold < -1.0F || args.identity_threshold > 1.0F) {
+    if (!std::isfinite(args.identity_threshold) || args.identity_threshold < -1.0F ||
+        args.identity_threshold > 1.0F) {
         throw std::runtime_error("--identity-threshold must be in [-1,1]");
     }
-    if (!std::isfinite(args.min_detection_score) || args.min_detection_score < 0.0F || args.min_detection_score > 1.0F) {
+    if (!std::isfinite(args.min_detection_score) || args.min_detection_score < 0.0F ||
+        args.min_detection_score > 1.0F) {
         throw std::runtime_error("--min-det-score must be 0..1");
     }
     if (args.enroll_samples < 1 || args.arcface_every < 1 || args.pad_every < 1) {
@@ -208,7 +223,7 @@ struct HudInfo {
 };
 
 class PreviewWindow {
-public:
+  public:
     PreviewWindow(std::uint32_t source_width, std::uint32_t source_height)
         : source_width_(source_width), source_height_(source_height) {
         create_window();
@@ -244,11 +259,8 @@ public:
         return down && !was_down;
     }
 
-    void render(
-        GpuFrame const& frame,
-        std::vector<OverlayTrack> const& tracks,
-        HudInfo const& hud
-    ) {
+    void render(GpuFrame const& frame, std::vector<OverlayTrack> const& tracks,
+                HudInfo const& hud) {
         ensure_graphics(frame);
 
         winrt::com_ptr<ID3D11VideoProcessorInputView> input_view;
@@ -258,14 +270,12 @@ public:
         iv.Texture2D.MipSlice = 0;
         iv.Texture2D.ArraySlice = 0;
         winrt::check_hresult(video_device_->CreateVideoProcessorInputView(
-            frame.texture.get(), enumerator_.get(), &iv, input_view.put()
-        ));
+            frame.texture.get(), enumerator_.get(), &iv, input_view.put()));
 
         RECT src{0, 0, static_cast<LONG>(source_width_), static_cast<LONG>(source_height_)};
         RECT dst{0, 0, static_cast<LONG>(source_width_), static_cast<LONG>(source_height_)};
-        video_context_->VideoProcessorSetStreamFrameFormat(
-            processor_.get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE
-        );
+        video_context_->VideoProcessorSetStreamFrameFormat(processor_.get(), 0,
+                                                           D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
         video_context_->VideoProcessorSetStreamSourceRect(processor_.get(), 0, TRUE, &src);
         video_context_->VideoProcessorSetStreamDestRect(processor_.get(), 0, TRUE, &dst);
         video_context_->VideoProcessorSetOutputTargetRect(processor_.get(), TRUE, &dst);
@@ -278,19 +288,17 @@ public:
         stream.FutureFrames = 0;
         stream.pInputSurface = input_view.get();
 
-        winrt::check_hresult(video_context_->VideoProcessorBlt(
-            processor_.get(), output_view_.get(), 0, 1, &stream
-        ));
+        winrt::check_hresult(
+            video_context_->VideoProcessorBlt(processor_.get(), output_view_.get(), 0, 1, &stream));
 
         draw_overlay(tracks, hud);
         winrt::check_hresult(swap_chain_->Present(1, 0));
     }
 
-private:
+  private:
     static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-        PreviewWindow* self = reinterpret_cast<PreviewWindow*>(
-            GetWindowLongPtrW(hwnd, GWLP_USERDATA)
-        );
+        PreviewWindow* self =
+            reinterpret_cast<PreviewWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (msg == WM_NCCREATE) {
             auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
             self = static_cast<PreviewWindow*>(cs->lpCreateParams);
@@ -323,40 +331,29 @@ private:
         wc.lpszClassName = kWindowClassName;
         RegisterClassExW(&wc);
 
-        constexpr int client_w = 1067; // 16:9 preview that fits comfortably on 1080p.
-        constexpr int client_h = 600;
-        RECT rect{0, 0, client_w, client_h};
-        const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        AdjustWindowRect(&rect, style, FALSE);
+        // 1. Dapatkan resolusi layar monitor utama secara dinamis
+        const int screen_width = GetSystemMetrics(SM_CXSCREEN);
+        const int screen_height = GetSystemMetrics(SM_CYSCREEN);
 
-        hwnd_ = CreateWindowExW(
-            0,
-            kWindowClassName,
-            L"TA Walk-Through Prototype v4.8",
-            style,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
-            nullptr,
-            nullptr,
-            instance,
-            this
-        );
+        // 2. Ubah style menjadi Borderless (tanpa title bar, tanpa border)
+        // Menghapus WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU
+        const DWORD style = WS_POPUP | WS_VISIBLE;
+
+        // 3. Buat window langsung menutupi seluruh layar dari koordinat (0, 0)
+        hwnd_ = CreateWindowExW(0, kWindowClassName, L"TA Walk-Through Prototype v4.8", style, 0, 0,
+                                screen_width, screen_height, nullptr, nullptr, instance, this);
+
         if (!hwnd_) throw std::runtime_error("CreateWindowExW failed");
-        ShowWindow(hwnd_, SW_SHOW);
+
+        ShowWindow(hwnd_, SW_SHOWMAXIMIZED);
         UpdateWindow(hwnd_);
 
-        font_ = CreateFontW(
-            25, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI"
-        );
-        font_small_ = CreateFontW(
-            21, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI"
-        );
+        font_ = CreateFontW(25, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        font_small_ = CreateFontW(21, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                  DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     }
 
     void ensure_graphics(GpuFrame const& frame) {
@@ -380,9 +377,7 @@ private:
         winrt::com_ptr<IDXGIAdapter> adapter;
         winrt::check_hresult(dxgi_device->GetAdapter(adapter.put()));
         winrt::com_ptr<IDXGIFactory2> factory;
-        winrt::check_hresult(adapter->GetParent(
-            __uuidof(IDXGIFactory2), factory.put_void()
-        ));
+        winrt::check_hresult(adapter->GetParent(__uuidof(IDXGIFactory2), factory.put_void()));
 
         DXGI_SWAP_CHAIN_DESC1 desc{};
         desc.Width = source_width_;
@@ -398,9 +393,8 @@ private:
         desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
         desc.Flags = DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
 
-        winrt::check_hresult(factory->CreateSwapChainForHwnd(
-            device_.get(), hwnd_, &desc, nullptr, nullptr, swap_chain_.put()
-        ));
+        winrt::check_hresult(factory->CreateSwapChainForHwnd(device_.get(), hwnd_, &desc, nullptr,
+                                                             nullptr, swap_chain_.put()));
         factory->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
 
         D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
@@ -415,23 +409,19 @@ private:
         content.OutputHeight = source_height_;
         content.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
 
-        winrt::check_hresult(video_device_->CreateVideoProcessorEnumerator(
-            &content, enumerator_.put()
-        ));
-        winrt::check_hresult(video_device_->CreateVideoProcessor(
-            enumerator_.get(), 0, processor_.put()
-        ));
+        winrt::check_hresult(
+            video_device_->CreateVideoProcessorEnumerator(&content, enumerator_.put()));
+        winrt::check_hresult(
+            video_device_->CreateVideoProcessor(enumerator_.get(), 0, processor_.put()));
 
-        winrt::check_hresult(swap_chain_->GetBuffer(
-            0, __uuidof(ID3D11Texture2D), back_buffer_.put_void()
-        ));
+        winrt::check_hresult(
+            swap_chain_->GetBuffer(0, __uuidof(ID3D11Texture2D), back_buffer_.put_void()));
 
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ov{};
         ov.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
         ov.Texture2D.MipSlice = 0;
         winrt::check_hresult(video_device_->CreateVideoProcessorOutputView(
-            back_buffer_.get(), enumerator_.get(), &ov, output_view_.put()
-        ));
+            back_buffer_.get(), enumerator_.get(), &ov, output_view_.put()));
 
         gdi_surface_ = back_buffer_.as<IDXGISurface1>();
     }
@@ -455,12 +445,13 @@ private:
         DeleteObject(panel);
 
         std::wostringstream line1;
-        line1 << L"FPS " << std::fixed << std::setprecision(1) << hud.fps
-              << L"   SCRFD GPU " << std::setprecision(1) << hud.scrfd_ms << L" ms"
-              << L"   ByteTrack CPU " << std::setprecision(3) << hud.bytetrack_ms << L" ms";
+        line1 << L"FPS " << std::fixed << std::setprecision(1) << hud.fps << L"   SCRFD GPU "
+              << std::setprecision(1) << hud.scrfd_ms << L" ms" << L"   ByteTrack CPU "
+              << std::setprecision(3) << hud.bytetrack_ms << L" ms";
         text(dc, 18, 9, line1.str(), RGB(110, 235, 255), font_);
 
-        std::wstring line2 = L"GPU image path: NV12 -> SCRFD / PAD / ArcFace   |   CPU: ByteTrack + decisions + overlay";
+        std::wstring line2 = L"GPU image path: NV12 -> SCRFD / PAD / ArcFace   |   CPU: ByteTrack "
+                             L"+ decisions + overlay";
         if (hud.pad_monitor) line2 += L"   |   PAD ADDON: VOTE MEDIAN (AFTER ENROLLMENT)";
         text(dc, 18, 41, line2, RGB(235, 235, 235), font_small_);
 
@@ -469,14 +460,20 @@ private:
         }
 
         for (auto const& t : tracks) {
-            const int x1 = std::clamp(static_cast<int>(std::lround(t.x1)), 0, static_cast<int>(source_width_) - 1);
-            const int y1 = std::clamp(static_cast<int>(std::lround(t.y1)), 0, static_cast<int>(source_height_) - 1);
-            const int x2 = std::clamp(static_cast<int>(std::lround(t.x2)), x1 + 1, static_cast<int>(source_width_));
-            const int y2 = std::clamp(static_cast<int>(std::lround(t.y2)), y1 + 1, static_cast<int>(source_height_));
+            const int x1 = std::clamp(static_cast<int>(std::lround(t.x1)), 0,
+                                      static_cast<int>(source_width_) - 1);
+            const int y1 = std::clamp(static_cast<int>(std::lround(t.y1)), 0,
+                                      static_cast<int>(source_height_) - 1);
+            const int x2 = std::clamp(static_cast<int>(std::lround(t.x2)), x1 + 1,
+                                      static_cast<int>(source_width_));
+            const int y2 = std::clamp(static_cast<int>(std::lround(t.y2)), y1 + 1,
+                                      static_cast<int>(source_height_));
 
             COLORREF color = RGB(0, 220, 255);
-            if (t.identity_matched) color = RGB(50, 255, 90);
-            else if (t.cosine.has_value()) color = RGB(255, 210, 50);
+            if (t.identity_matched)
+                color = RGB(50, 255, 90);
+            else if (t.cosine.has_value())
+                color = RGB(255, 210, 50);
 
             HPEN pen = CreatePen(PS_SOLID, 4, color);
             HGDIOBJ old_pen = SelectObject(dc, pen);
@@ -487,7 +484,8 @@ private:
             DeleteObject(pen);
 
             std::wostringstream row1;
-            row1 << L"ID" << t.track_id << L"  det " << std::fixed << std::setprecision(2) << t.det_score;
+            row1 << L"ID" << t.track_id << L"  det " << std::fixed << std::setprecision(2)
+                 << t.det_score;
             text(dc, x1 + 4, std::max(80, y1 - 50), row1.str(), color, font_);
 
             std::wostringstream row2;
@@ -496,7 +494,8 @@ private:
                 if (t.cosine) row2 << L"  cos " << std::fixed << std::setprecision(3) << *t.cosine;
             } else if (t.cosine) {
                 row2 << L"ArcFace cos " << std::fixed << std::setprecision(3) << *t.cosine
-                     << L"  (demo T=" << std::setprecision(2) << hud.demo_identity_threshold << L")";
+                     << L"  (demo T=" << std::setprecision(2) << hud.demo_identity_threshold
+                     << L")";
             } else {
                 row2 << L"ArcFace waiting";
             }
@@ -505,12 +504,15 @@ private:
             if (hud.pad_monitor && t.pad_p_real) {
                 std::wostringstream row3;
                 row3 << L"PAD real " << std::fixed << std::setprecision(3) << *t.pad_p_real
-                     << (*t.pad_p_real >= vision_runtime::liveness::kTaLiveThreshold ? L" LIVE" : L" SPOOF");
-                text(dc, x1 + 4, std::min(static_cast<int>(source_height_) - 28, y2 + 5), row3.str(), RGB(255, 190, 80), font_small_);
+                     << (*t.pad_p_real >= vision_runtime::liveness::kTaLiveThreshold ? L" LIVE"
+                                                                                     : L" SPOOF");
+                text(dc, x1 + 4, std::min(static_cast<int>(source_height_) - 28, y2 + 5),
+                     row3.str(), RGB(255, 190, 80), font_small_);
             }
         }
 
-        std::wstring keys = L"[E] re-enroll   [P] PAD monitor on/off   [R] reset tracker/state   [ESC] exit";
+        std::wstring keys =
+            L"[E] re-enroll   [P] PAD monitor on/off   [R] reset tracker/state   [ESC] exit";
         text(dc, 18, static_cast<int>(source_height_) - 33, keys, RGB(240, 240, 240), font_small_);
 
         gdi_surface_->ReleaseDC(nullptr);
@@ -543,10 +545,8 @@ struct TrackState {
     bool identity_matched = false;
 };
 
-std::array<float, kEmbeddingSize> finalize_reference(
-    std::array<double, kEmbeddingSize> const& sum,
-    int count
-) {
+std::array<float, kEmbeddingSize> finalize_reference(std::array<double, kEmbeddingSize> const& sum,
+                                                     int count) {
     if (count <= 0) throw std::runtime_error("No enrollment embeddings");
     std::array<float, kEmbeddingSize> ref{};
     for (std::size_t i = 0; i < ref.size(); ++i) {
@@ -555,13 +555,9 @@ std::array<float, kEmbeddingSize> finalize_reference(
     return vision_runtime::arcface::normalize_embedding(std::move(ref));
 }
 
-void clear_identity_state(
-    std::unordered_map<std::uint64_t, TrackState>& states,
-    std::array<double, kEmbeddingSize>& enroll_sum,
-    int& enrolled,
-    bool& reference_ready,
-    std::array<float, kEmbeddingSize>& reference
-) {
+void clear_identity_state(std::unordered_map<std::uint64_t, TrackState>& states,
+                          std::array<double, kEmbeddingSize>& enroll_sum, int& enrolled,
+                          bool& reference_ready, std::array<float, kEmbeddingSize>& reference) {
     enroll_sum.fill(0.0);
     enrolled = 0;
     reference_ready = false;
@@ -583,6 +579,8 @@ int main(int argc, char** argv) {
         const Args args = parse_args(argc, argv);
 
         vision_runtime::pipeline::FaceTrackingConfig tracking_cfg{};
+        edge_app::Database database{demo_database_path()};
+        edge_app::OutboxRepository outbox{database};
         tracking_cfg.camera.width = 1280;
         tracking_cfg.camera.height = 720;
         tracking_cfg.camera.fps = 30;
@@ -624,7 +622,8 @@ int main(int argc, char** argv) {
             << "Camera              : MediaCapture/MediaFrameReader 1280x720@30 NV12 GPU-backed\n"
             << "SCRFD               : GPU preprocessing + WinML/DirectML\n"
             << "ByteTrack           : native CPU (intentional winner)\n"
-            << "PAD                 : InsightFace addon GPU; TA threshold 0.95; shared attendance gate\n"
+            << "PAD                 : InsightFace addon GPU; TA threshold 0.95; shared attendance "
+               "gate\n"
             << "ArcFace             : GPU alignment/preprocessing + WinML/DirectML\n"
             << "Preview             : D3D11 video processor -> swapchain; no CPU image array\n"
             << "Overlay/control     : CPU/GDI + small model outputs\n"
@@ -643,13 +642,15 @@ int main(int argc, char** argv) {
             config.min_detection_score = args.min_detection_score;
             config.pad_every_frames = static_cast<std::size_t>(args.pad_every);
             config.recognition_every_frames = static_cast<std::size_t>(args.arcface_every);
-            decisions = std::make_unique<vision_runtime::pipeline::AttendanceProcessor>(config,
-                vision_runtime::pipeline::BiometricEvaluators{
-                    [&](auto const& frame, auto const& faces) { return pad->evaluate_many(frame, faces); },
-                    [&](auto const& frame, auto const& faces) { return recognizer.evaluate_many(frame, faces); }
-                });
+            decisions = std::make_unique<vision_runtime::pipeline::AttendanceProcessor>(
+                config, vision_runtime::pipeline::BiometricEvaluators{
+                            [&](auto const& frame, auto const& faces) {
+                                return pad->evaluate_many(frame, faces);
+                            },
+                            [&](auto const& frame, auto const& faces) {
+                                return recognizer.evaluate_many(frame, faces);
+                            }});
         }
-
 
         PreviewWindow preview{1280, 720};
         runtime.start();
@@ -685,7 +686,8 @@ int main(int argc, char** argv) {
             if (preview.consume_key('P')) {
                 if (pad) {
                     pad_monitor_enabled = !pad_monitor_enabled;
-                    std::cout << "[DEMO] PAD raw monitor " << (pad_monitor_enabled ? "ON" : "OFF") << "\n";
+                    std::cout << "[DEMO] PAD raw monitor " << (pad_monitor_enabled ? "ON" : "OFF")
+                              << "\n";
                 } else {
                     std::cout << "[DEMO] PAD module unavailable.\n";
                 }
@@ -704,7 +706,8 @@ int main(int argc, char** argv) {
             ++fps_window_frames;
 
             const auto now = Clock::now();
-            const double fps_elapsed = std::chrono::duration<double>(now - fps_window_begin).count();
+            const double fps_elapsed =
+                std::chrono::duration<double>(now - fps_window_begin).count();
             if (fps_elapsed >= 0.5) {
                 fps = static_cast<double>(fps_window_frames) / fps_elapsed;
                 fps_window_frames = 0;
@@ -725,11 +728,14 @@ int main(int argc, char** argv) {
 
             // During manual enrollment, show scores only. Once enrolled, the shared
             // processor supplies PAD results without a second inference pass.
-            if (!reference_ready && pad && pad_monitor_enabled && (tracking_frame_index % static_cast<std::uint64_t>(args.pad_every) == 0)) {
+            if (!reference_ready && pad && pad_monitor_enabled &&
+                (tracking_frame_index % static_cast<std::uint64_t>(args.pad_every) == 0)) {
                 std::vector<vision_runtime::FaceDetection> observations;
                 std::vector<std::uint64_t> ids;
                 for (auto const& track : frame->tracks) {
-                    if (!track.has_observation || track.observation.score < args.min_detection_score) continue;
+                    if (!track.has_observation ||
+                        track.observation.score < args.min_detection_score)
+                        continue;
                     observations.push_back(track.observation);
                     ids.push_back(track.track_id);
                 }
@@ -742,16 +748,21 @@ int main(int argc, char** argv) {
             }
 
             // Enrollment: require exactly one current high-quality observed face.
-            if (!reference_ready && (tracking_frame_index % static_cast<std::uint64_t>(args.arcface_every) == 2 % args.arcface_every)) {
+            if (!reference_ready &&
+                (tracking_frame_index % static_cast<std::uint64_t>(args.arcface_every) ==
+                 2 % args.arcface_every)) {
                 std::vector<TrackResult const*> candidates;
                 for (auto const& track : frame->tracks) {
-                    if (track.has_observation && track.observation.score >= args.min_detection_score) {
+                    if (track.has_observation &&
+                        track.observation.score >= args.min_detection_score) {
                         candidates.push_back(&track);
                     }
                 }
                 if (candidates.size() == 1) {
-                    ArcFaceResult result = recognizer.evaluate(frame->gpu_frame, candidates[0]->observation);
-                    for (std::size_t i = 0; i < kEmbeddingSize; ++i) enroll_sum[i] += result.embedding[i];
+                    ArcFaceResult result =
+                        recognizer.evaluate(frame->gpu_frame, candidates[0]->observation);
+                    for (std::size_t i = 0; i < kEmbeddingSize; ++i)
+                        enroll_sum[i] += result.embedding[i];
                     ++enrolled;
                     if (enrolled >= args.enroll_samples) {
                         reference = finalize_reference(enroll_sum, enrolled);
@@ -762,7 +773,8 @@ int main(int argc, char** argv) {
                             state.cosine.reset();
                             state.identity_matched = false;
                         }
-                        std::cout << "[DEMO] ArcFace reference locked from " << enrolled << " samples.\n";
+                        std::cout << "[DEMO] ArcFace reference locked from " << enrolled
+                                  << " samples.\n";
                     }
                 }
             }
@@ -777,15 +789,31 @@ int main(int argc, char** argv) {
                     state.identity_matched = snapshot.phase == Phase::Recognized ||
                                              snapshot.phase == Phase::DuplicateIdentity;
                     state.cosine = snapshot.recognition_attempts
-                        ? std::optional<float>{snapshot.identity_similarity} : std::nullopt;
+                                       ? std::optional<float>{snapshot.identity_similarity}
+                                       : std::nullopt;
                     state.pad_p_real = snapshot.pad_attempts
-                        ? std::optional<float>{snapshot.pad_median_p_real} : std::nullopt;
+                                           ? std::optional<float>{snapshot.pad_median_p_real}
+                                           : std::nullopt;
                 }
                 for (auto const& event : result.attendance_events) {
-                    std::cout << "[ATTENDANCE-DEMO] identity=" << event.identity_id
-                              << " track=ID" << event.track_id
-                              << " cosine=" << event.similarity
-                              << " (shared decision engine; demo enrollment, not persisted)\n";
+                    edge_app::AttendanceObservation observation{};
+                    observation.occurred_at_utc_ms = event.occurred_at_utc_ms;
+                    observation.camera_frame_id = event.camera_frame_id;
+                    observation.track_id = event.track_id;
+                    observation.identity_id = event.identity_id;
+                    observation.similarity = event.similarity;
+                    observation.similarity_margin = event.similarity_margin;
+                    observation.pad_median_p_real = event.pad_median_p_real;
+                    observation.pad_median_margin_p_real =
+                        event.pad_median_p_real - vision_runtime::liveness::kTaLiveThreshold;
+
+                    auto record =
+                        edge_app::envelope(observation, "ta-demo-local", "local-enrollment-v1");
+                    outbox.ensure_enqueued(record);
+                    std::cout << "[ATTENDANCE-DEMO] identity=" << event.identity_id << " track=ID"
+                              << event.track_id << " cosine=" << event.similarity
+                              << " stored event=" << record.id
+                              << " pending=" << outbox.pending_count() << '\n';
                 }
             }
 
@@ -804,7 +832,8 @@ int main(int argc, char** argv) {
                     o.pad_p_real = it->second.pad_p_real;
                     o.cosine = it->second.cosine;
                     o.identity_matched = it->second.identity_matched;
-                    if (o.identity_matched) o.identity_name = widen_ascii(args.identity_name) + L" | IDENTIFIED";
+                    if (o.identity_matched)
+                        o.identity_name = widen_ascii(args.identity_name) + L" | IDENTIFIED";
                 }
                 overlay_tracks.push_back(std::move(o));
             }
@@ -825,8 +854,10 @@ int main(int argc, char** argv) {
                     << L" - keep exactly one face visible";
                 hud.message = msg.str();
             } else {
-                hud.message = decisions ? L"REFERENCE READY - shared PAD gate + recognition; DEMO threshold, no persistence"
-                                        : L"PAD DISABLED - enrollment/preview only; attendance disabled";
+                hud.message = decisions
+                                  ? L"REFERENCE READY - shared PAD gate + recognition; DEMO "
+                                    L"threshold, no persistence"
+                                  : L"PAD DISABLED - enrollment/preview only; attendance disabled";
             }
 
             preview.render(frame->gpu_frame, overlay_tracks, hud);

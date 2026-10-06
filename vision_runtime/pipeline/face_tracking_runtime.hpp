@@ -45,7 +45,7 @@ struct FaceTrackingFrame {
 // GpuFrame + current matched FaceDetection metadata form the boundary for the
 // next pipeline stage without bringing the image through OpenCV/NumPy.
 class FaceTrackingRuntime {
-public:
+  public:
     explicit FaceTrackingRuntime(FaceTrackingConfig config);
     ~FaceTrackingRuntime();
 
@@ -57,9 +57,8 @@ public:
     FaceTrackingRuntime& start();
     void stop() noexcept;
 
-    [[nodiscard]] std::optional<FaceTrackingFrame> wait_for_frame(
-        std::chrono::milliseconds timeout = std::chrono::milliseconds{1000}
-    );
+    [[nodiscard]] std::optional<FaceTrackingFrame>
+    wait_for_frame(std::chrono::milliseconds timeout = std::chrono::milliseconds{1000});
 
     void reset_tracker();
 
@@ -67,7 +66,7 @@ public:
     [[nodiscard]] FaceTrackingConfig config() const;
     [[nodiscard]] std::uint64_t failed_camera_reads() const noexcept;
 
-private:
+  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

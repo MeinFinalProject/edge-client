@@ -36,6 +36,8 @@ target_link_libraries(ta_demo
         gdi32
 )
 
+add_vision_tool(zero_copy_benchmark zero_copy_benchmark.cpp)
+
 add_vision_tool(check_ta_demo check_ta_demo.cpp)
 target_link_libraries(check_ta_demo PRIVATE edge_app_core)
 

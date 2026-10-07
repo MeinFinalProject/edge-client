@@ -100,6 +100,7 @@ struct Args {
     int pad_every = 10;
     bool pad_monitor = true; // display toggle; recognition always requires PAD
     bool pad_disabled = false;
+    int benchmark_seconds = 0;
 };
 
 Args parse_args(int argc, char** argv) {
@@ -134,6 +135,11 @@ Args parse_args(int argc, char** argv) {
         } else if (token == "--no-pad") {
             args.pad_disabled = true;
             args.pad_monitor = false;
+        } else if (token == "--benchmark-seconds") {
+            args.benchmark_seconds = std::stoi(need("--benchmark-seconds"));
+            if (args.benchmark_seconds < 1) {
+                throw std::runtime_error("--benchmark-seconds must be >= 1");
+            }
         } else if (token == "--help" || token == "-h") {
             std::cout << "ta_demo v4.8 options:\n"
                       << "  --name <label>                 default ENROLLED\n"
@@ -143,6 +149,7 @@ Args parse_args(int argc, char** argv) {
                       << "  --pad-every <frames>           default 10\n"
                       << "  --pad-monitor                   start with PAD raw-score monitor ON\n"
                       << "  --no-pad                        disable PAD module entirely\n"
+                      << "  --benchmark-seconds <seconds>   run without keyboard input and print FPS\n"
                       << "  --scrfd <det_500m.onnx>\n"
                       << "  --pad <liveness.onnx>          selected InsightFace addon\n"
                       << "  --arcface <w600k_r50.onnx>\n";
@@ -627,6 +634,9 @@ int main(int argc, char** argv) {
             << "ArcFace             : GPU alignment/preprocessing + WinML/DirectML\n"
             << "Preview             : D3D11 video processor -> swapchain; no CPU image array\n"
             << "Overlay/control     : CPU/GDI + small model outputs\n"
+            << "Benchmark           : "
+            << (args.benchmark_seconds > 0 ? "timed run" : "interactive")
+            << "\n"
             << "Enrollment          : " << args.enroll_samples << " ArcFace samples\n"
             << "Demo identity T     : " << args.identity_threshold << " (NOT final calibrated)\n\n";
 
@@ -674,6 +684,7 @@ int main(int argc, char** argv) {
         auto fps_window_begin = Clock::now();
         std::uint64_t fps_window_frames = 0;
         double fps = 0.0;
+        const auto benchmark_begin = Clock::now();
         bool running = true;
 
         while (running && preview.pump_messages()) {
@@ -704,6 +715,13 @@ int main(int argc, char** argv) {
             if (!frame) continue;
             ++tracking_frame_index;
             ++fps_window_frames;
+
+            if (args.benchmark_seconds > 0 &&
+                std::chrono::duration_cast<std::chrono::seconds>(Clock::now() -
+                                                                  benchmark_begin)
+                        .count() >= args.benchmark_seconds) {
+                running = false;
+            }
 
             const auto now = Clock::now();
             const double fps_elapsed =
@@ -864,6 +882,14 @@ int main(int argc, char** argv) {
         }
 
         runtime.stop();
+        if (args.benchmark_seconds > 0) {
+            const double elapsed =
+                std::chrono::duration<double>(Clock::now() - benchmark_begin).count();
+            std::cout << std::fixed << std::setprecision(3)
+                      << "[BENCHMARK] frames=" << tracking_frame_index
+                      << " elapsed_s=" << elapsed
+                      << " avg_fps=" << (tracking_frame_index / elapsed) << std::endl;
+        }
         return 0;
     } catch (winrt::hresult_error const& e) {
         std::cerr << "WinRT/DX error: 0x" << std::hex << static_cast<unsigned long>(e.code().value)

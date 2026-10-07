@@ -80,7 +80,7 @@ struct LivenessResult {
 //
 // GPU path:
 //   camera NV12 D3D11 texture
-//     -> shared NV12 staging texture
+//     -> direct D3D11On12 texture import, or shared-NV12 CopyResource fallback
 //     -> D3D11On12 compute: 5-point aligned warp + NV12->RGB + /255 + NCHW
 //     -> D3D12 TensorFloat
 //     -> 4-byte coverage ratio to CPU; skip inference for rejected crops

@@ -1,4 +1,5 @@
 #include "scrfd/gpu_preprocessor.hpp"
+#include "common/camera_texture_import.hpp"
 #include "scrfd/detector.hpp"
 #include "scrfd/scrfd_tensorize.h"
 
@@ -113,6 +114,9 @@ struct ScrfdGpuPreprocessor::Impl {
     winrt::com_ptr<ID3D11Texture2D> shared_nv12_interop;
     winrt::com_ptr<ID3D11ShaderResourceView> y_srv;
     winrt::com_ptr<ID3D11ShaderResourceView> uv_srv;
+    // Zero-copy: SRV langsung ke texture kamera. y_srv/uv_srv di atas tetap ada
+    // sebagai fallback (CopyResource) bila impor tidak memungkinkan.
+    std::unique_ptr<CameraTextureImporter> camera_importer;
 
     winrt::com_ptr<ID3D11ComputeShader> tensorize_shader;
     winrt::com_ptr<ID3D11SamplerState> linear_sampler;
@@ -171,6 +175,8 @@ struct ScrfdGpuPreprocessor::Impl {
         create_learning_device();
         create_interop_device();
         create_shared_nv12(frame);
+        camera_importer =
+            std::make_unique<CameraTextureImporter>(interop_device3, interop_11on12, "SCRFD");
         compile_shader();
         create_sampler();
         create_params_buffer();
@@ -497,8 +503,17 @@ struct ScrfdGpuPreprocessor::Impl {
                 "Camera D3D11 device berubah; SCRFD preprocessor harus dibuat ulang");
         }
 
-        // 1) Camera D3D11 -> shared NV12 texture. GPU-to-GPU copy saja.
-        camera_context->CopyResource(shared_nv12_camera.get(), frame.texture.get());
+        // 1) Zero-copy: texture kamera diimpor langsung ke device interop. Kalau
+        // tidak memungkinkan (nullopt), pakai jalur lama: GPU-to-GPU copy.
+        auto camera_views = camera_importer->acquire(frame);
+        if (!camera_views) {
+            camera_context->CopyResource(shared_nv12_camera.get(), frame.texture.get());
+        }
+        ID3D11ShaderResourceView* const frame_y_srv =
+            camera_views ? camera_views->y.get() : y_srv.get();
+        ID3D11ShaderResourceView* const frame_uv_srv =
+            camera_views ? camera_views->uv.get() : uv_srv.get();
+        auto camera_access = camera_importer->access(camera_views ? &*camera_views : nullptr);
 
         const std::uint64_t fence_value = ++camera_fence_value;
         check_hr_stage(camera_context4->Signal(camera_fence11.get(), fence_value),
@@ -506,7 +521,7 @@ struct ScrfdGpuPreprocessor::Impl {
         camera_context->Flush();
 
         // 2) D3D11On12 menggunakan D3D12 queue yang sama dengan WinML.
-        // Queue baru membaca shared NV12 setelah copy dari camera device selesai.
+        // Queue membaca input sesudah import/copy pada camera device selesai.
         check_hr_stage(d3d12_queue->Wait(camera_fence12.get(), fence_value),
                        "ID3D12CommandQueue::Wait(camera fence)");
 
@@ -514,8 +529,8 @@ struct ScrfdGpuPreprocessor::Impl {
         interop_11on12->AcquireWrappedResources(wrapped_resources, 1);
 
         ID3D11ShaderResourceView* srvs[2] = {
-            y_srv.get(),
-            uv_srv.get(),
+            frame_y_srv,
+            frame_uv_srv,
         };
         interop_context->CSSetShaderResources(0, 2, srvs);
 
@@ -556,6 +571,7 @@ struct ScrfdGpuPreprocessor::Impl {
         // Evaluate() sesudah fungsi ini akan masuk ke queue yang sama sehingga
         // urutannya tetap GPU-side tanpa CPU wait/readback.
         interop_11on12->ReleaseWrappedResources(wrapped_resources, 1);
+        camera_access.release();
         interop_context->Flush();
 
         return tensor;

@@ -26,9 +26,12 @@ struct ScrfdPreprocessTransform {
 
 // GPU preprocessing khusus input SCRFD.
 //
-// Jalur data v3.4:
+// Jalur input:
 //   camera ID3D11Texture2D NV12
-//      -> GPU CopyResource ke legacy-shared NV12 Texture2D
+//      -> default: CameraTextureImporter membuka texture yang sama melalui
+//         NT shared handle -> D3D12 OpenSharedHandle -> D3D11On12 wrapper/SRV
+//      -> fallback bila EDGE_ZERO_COPY=0 atau import gagal:
+//         GPU CopyResource ke legacy-shared NV12 Texture2D
 //      -> D3D11On12 compute shader
 //         * bilinear resize + letterbox
 //         * NV12 -> RGB (BT.709 limited range)
@@ -40,10 +43,9 @@ struct ScrfdPreprocessTransform {
 // Kenapa D3D12-first:
 // D3D11 cross-device shared resources secara resmi ditujukan untuk Texture2D;
 // shared structured buffer v3.2 ditolak driver dengan E_INVALIDARG.
-// v3.3 kemudian menemukan NV12 + SHARED_NTHANDLE juga ditolak driver; v3.4
-// memakai legacy DXGI SHARED handle untuk texture NV12. Tensor
-// sekarang dibuat sebagai native D3D12 buffer, lalu hanya diberi wrapped D3D11
-// UAV melalui D3D11On12 agar compute shader dapat mengisinya.
+// Fallback mempertahankan legacy DXGI SHARED NV12 texture. Tensor dibuat sebagai
+// native D3D12 buffer, lalu diberi wrapped D3D11 UAV melalui D3D11On12 agar
+// compute shader dapat mengisinya.
 //
 // Tidak ada Map()/readback pixel ke CPU.
 class ScrfdGpuPreprocessor {

@@ -1,4 +1,5 @@
 #include "liveness/gpu_preprocessor.hpp"
+#include "common/camera_texture_import.hpp"
 #include "liveness/liveness_coverage_reduce.h"
 #include "liveness/liveness_tensorize.h"
 
@@ -96,6 +97,10 @@ struct LivenessGpuPreprocessor::Impl {
     winrt::com_ptr<ID3D11Texture2D> shared_nv12_interop;
     winrt::com_ptr<ID3D11ShaderResourceView> y_srv;
     winrt::com_ptr<ID3D11ShaderResourceView> uv_srv;
+    // Zero-copy: SRV langsung ke texture kamera (diisi di prepare_frame).
+    // y_srv/uv_srv di atas tetap ada sebagai fallback (CopyResource).
+    std::unique_ptr<CameraTextureImporter> camera_importer;
+    std::optional<CameraTextureImporter::Views> frame_views;
 
     winrt::com_ptr<ID3D11ComputeShader> tensorize_shader;
     winrt::com_ptr<ID3D11ComputeShader> coverage_reduce_shader;
@@ -155,6 +160,8 @@ struct LivenessGpuPreprocessor::Impl {
         create_learning_device();
         create_interop_device();
         create_shared_nv12(frame);
+        camera_importer =
+            std::make_unique<CameraTextureImporter>(interop_device3, interop_11on12, "LIVENESS");
         create_shaders();
         create_coverage_buffers();
         create_sampler();
@@ -447,7 +454,11 @@ struct LivenessGpuPreprocessor::Impl {
     void prepare_frame(GpuFrame const& frame) {
         validate_frame(frame);
 
-        camera_context->CopyResource(shared_nv12_camera.get(), frame.texture.get());
+        // Zero-copy bila bisa; kalau tidak, jalur lama (GPU-to-GPU copy).
+        frame_views = camera_importer->acquire(frame);
+        if (!frame_views) {
+            camera_context->CopyResource(shared_nv12_camera.get(), frame.texture.get());
+        }
 
         const std::uint64_t value = ++camera_fence_value;
         check_hr_stage(camera_context4->Signal(camera_fence11.get(), value),
@@ -501,10 +512,14 @@ struct LivenessGpuPreprocessor::Impl {
 
         update_params(transform);
 
+        auto camera_access = camera_importer->access(frame_views ? &*frame_views : nullptr);
         ID3D11Resource* wrapped[] = {tensor_buffer_wrapped11.get()};
         interop_11on12->AcquireWrappedResources(wrapped, 1);
 
-        ID3D11ShaderResourceView* srvs[2] = {y_srv.get(), uv_srv.get()};
+        ID3D11ShaderResourceView* srvs[2] = {
+            frame_views ? frame_views->y.get() : y_srv.get(),
+            frame_views ? frame_views->uv.get() : uv_srv.get(),
+        };
         interop_context->CSSetShaderResources(0, 2, srvs);
 
         ID3D11UnorderedAccessView* uavs[2] = {tensor_uav.get(), coverage_uav.get()};
@@ -536,6 +551,7 @@ struct LivenessGpuPreprocessor::Impl {
         interop_context->CSSetShader(nullptr, nullptr, 0);
 
         interop_11on12->ReleaseWrappedResources(wrapped, 1);
+        camera_access.release();
         D3D11_BOX scalar_box{100, 0, 0, 104, 1, 1};
         interop_context->CopySubresourceRegion(coverage_readback.get(), 0, 0, 0, 0,
                                                coverage_buffer.get(), 0, &scalar_box);
